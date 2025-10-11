@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: maria-ledger
+Version: 0.1.0
+Requires-Python: >=3.8
+Requires-Dist: mysql-connector-python
+Requires-Dist: pyyaml
+Dynamic: requires-dist
+Dynamic: requires-python

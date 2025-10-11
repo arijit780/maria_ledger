@@ -1,0 +1,10 @@
+
+
+
+Login :
+(.venv) arijitsen@Arijits-MacBook-Air maria_ledger % sudo mysql
+
+Password:
+
+see user info:
+SELECT user, host, plugin FROM mysql.user;
