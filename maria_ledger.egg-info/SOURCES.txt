@@ -5,6 +5,7 @@ maria_ledger/__init__.py
 maria_ledger.egg-info/PKG-INFO
 maria_ledger.egg-info/SOURCES.txt
 maria_ledger.egg-info/dependency_links.txt
+maria_ledger.egg-info/entry_points.txt
 maria_ledger.egg-info/requires.txt
 maria_ledger.egg-info/top_level.txt
 maria_ledger/cli/__init__.py
