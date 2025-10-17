@@ -1,9 +1,12 @@
 -- ============================================
--- Tamper-evident ledger_customers table
+-- Reset environment
 -- ============================================
-
+DROP TABLE IF EXISTS ledger_roots;
 DROP TABLE IF EXISTS ledger_customers;
 
+-- ============================================
+-- Tamper-evident ledger_customers table
+-- ============================================
 CREATE TABLE ledger_customers (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
     name            VARCHAR(255),
@@ -51,11 +54,15 @@ END;
 //
 DELIMITER ;
 
-
--- Add this at the end of triggers.sql
-CREATE TABLE IF NOT EXISTS ledger_roots (
+-- ============================================
+-- Ledger roots table (Merkle root storage)
+-- ============================================
+CREATE TABLE ledger_roots (
     table_name VARCHAR(255),
     root_hash CHAR(64),
     computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(6),
+    signature TEXT,
+    signer VARCHAR(255),
+    pubkey_fingerprint CHAR(64),
     PRIMARY KEY(table_name, computed_at)
 );

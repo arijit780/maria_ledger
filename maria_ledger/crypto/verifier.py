@@ -1,6 +1,39 @@
 from maria_ledger.crypto.hash_chain import compute_row_hash
 from maria_ledger.db.connection import get_connection
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+
+def sign_merkle_root(root_hash: str, private_key_path: str) -> bytes:
+    with open(private_key_path, "rb") as f:
+        private_key = serialization.load_pem_private_key(f.read(), password=None)
+    signature = private_key.sign(
+        root_hash.encode(),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
+    return signature
+
+def verify_merkle_signature(root_hash: str, signature: bytes, public_key_path: str) -> bool:
+    with open(public_key_path, "rb") as f:
+        public_key = serialization.load_pem_public_key(f.read())
+    try:
+        public_key.verify(
+            signature,
+            root_hash.encode(),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        return True
+    except Exception:
+        return False
+    
 def verify_table_chain(table_name: str) -> bool:
     """
     Recompute hashes for all versions in table and validate continuity.
