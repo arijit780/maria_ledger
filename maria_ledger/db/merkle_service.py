@@ -2,7 +2,7 @@ from maria_ledger.db.connection import get_connection
 from maria_ledger.crypto.merkle_tree import MerkleTree
 from maria_ledger.utils.config import get_config
 from maria_ledger.utils.keys import public_key_fingerprint_from_file, load_private_key
-from maria_ledger.crypto.signing import sign_message
+from maria_ledger.crypto.signer import sign_merkle_root
 import base64, os
 
 
@@ -25,7 +25,7 @@ def compute_and_store_merkle_root(table_name: str) -> str:
     # Sign the root
     priv_path = cfg["crypto"]["private_key_path"]
     signer_id = cfg["crypto"].get("signer_id", "maria-ledger")
-    signature_b64 = sign_message(priv_path, root)
+    signature_b64 = sign_merkle_root(priv_path, root)
 
     # fingerprint of public key
     pub_path = cfg["crypto"]["public_key_path"]

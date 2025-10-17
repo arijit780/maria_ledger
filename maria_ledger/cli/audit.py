@@ -3,7 +3,6 @@ import datetime
 from maria_ledger.db.connection import get_connection
 from maria_ledger.db.merkle_service import verify_table_with_merkle_root, compute_and_store_merkle_root
 from maria_ledger.utils.logger import get_logger
-from maria_ledger.utils.config import get_alert_config
 from maria_ledger.utils.formatter import pretty_time
 from maria_ledger.utils.alerts import send_alert
 
