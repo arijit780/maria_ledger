@@ -2,3 +2,6 @@ pyyaml
 typer
 tabulate
 mysql-connector-python
+cryptography
+datetime
+rich

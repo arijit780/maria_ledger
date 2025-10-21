@@ -5,3 +5,7 @@ __pycache__
 *.egg-info
 *.pem
 keys/*
+future.md
+approach.md
+*.json
+*sql

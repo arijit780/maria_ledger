@@ -1,6 +1,6 @@
 import hashlib
 import math
-from maria_ledger.db.connection import get_connection
+from typing import Optional
 
 def sha256(data: str) -> str:
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
@@ -9,6 +9,7 @@ class MerkleTree:
     def __init__(self, leaves: list[str]):
         self.leaves = leaves
         self.levels = []
+        self.root: Optional[str] = None
         if leaves:
             self.build_tree()
 
@@ -56,20 +57,9 @@ class MerkleTree:
         return computed == root
 
 
-def verify_table_with_merkle_root(table_name: str, root_hash: str) -> bool:
+@classmethod
+def create_from_hashes(cls, hashes: list[str]) -> 'MerkleTree':
     """
-    Fetch row_hashes from table, rebuild Merkle tree, and compare with provided root_hash.
-    Returns True if root matches.
+    Factory method to create a MerkleTree from a list of hashes.
     """
-    conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute(f"SELECT row_hash FROM {table_name} ORDER BY valid_from ASC")
-    hashes = [row['row_hash'] for row in cursor.fetchall()]
-    cursor.close()
-    conn.close()
-
-    if not hashes:
-        return False  # empty table
-
-    tree = MerkleTree(hashes)
-    return tree.get_root() == root_hash
+    return cls(hashes)
