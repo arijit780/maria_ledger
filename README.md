@@ -1,4 +1,4 @@
-# Maria Ledger
+# Maria Ledger - Universal Ledger System
 
 Maria Ledger is a tamper-evident database system built on MariaDB. It ensures data integrity using hash chains and Merkle trees, making it suitable for applications requiring strong guarantees of data authenticity.
 
@@ -54,24 +54,25 @@ maria_ledger/
 
 ## Features
 
-- **Tamper-Evident Database**: Uses hash chains to ensure data integrity.
-- **Merkle Trees**: Efficiently validate large datasets.
-- **System Versioning**: Tracks historical changes to data.
-- **CLI Tools**: Verify, audit, and diff database states.
+- **Universal Immutable Ledger**: A single `ledger` table acts as a centralized, append-only log for all changes across multiple tables.
+- **State Reconstruction**: Ability to rebuild the state of any table at any point in time from the immutable ledger.
+- **State Verification**: Cryptographically verify that the current state of a live table has not been tampered with by comparing its Merkle root against the one derived from the ledger.
+- **Merkle Tree Checkpoints**: Periodically store Merkle roots of table states for efficient, long-term integrity validation.
+- **Advanced CLI Tools**: Reconstruct, verify, audit, and analyze database states.
 - **Extensible Design**: Modular components for cryptography, database, and utilities.
 
 ## Setup
 
 1. **Install Dependencies**:
    ```bash
-   pip install -r requirements.txt
+   pip install -e .
    ```
 
 2. **Set Up Database**:
-   - Create the `ledger_customers` table and triggers using `triggers.sql`.
-   - Example:
+   - The new architecture uses a universal `ledger` table and triggers on your business tables (e.g., `customers`) to populate it.
+   - Run the setup script to create the `ledger`, `ledger_roots`, and an example `customers` table with its triggers.
      ```sql
-     SOURCE examples/setup_ledger.sql;
+     mysql -u <user> -p <database> < setup_new_ledger.sql
      ```
 
 3. **Run Tests**:
@@ -79,16 +80,12 @@ maria_ledger/
    pytest tests/
    ```
 
-4. **Run Verifier**:
-   ```bash
-   python -m maria_ledger.crypto.verifier ledger_customers
-   ```
-
 ## Usage
 
-- **Verify Hash Chain**:
+- **Reconstruct a Table's State**:
+  Rebuild the state of the `customers` table from the ledger and get its integrity hash (Merkle Root).
   ```bash
-  python -m maria_ledger.crypto.verifier ledger_customers
+  maria-ledger reconstruct customers
   ```
 
 - **Compute Merkle Root**:

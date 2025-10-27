@@ -1,11 +1,10 @@
 from maria_ledger.db.connection import get_connection
-from maria_ledger.crypto.merkle_tree import MerkleTree
 from maria_ledger.utils.config import get_config
 from maria_ledger.utils.keys import public_key_fingerprint_from_file, load_private_key
 from maria_ledger.crypto.signer import sign_merkle_root
+from maria_ledger.cli.reconstruct import reconstruct_table_state
 from typing import Optional, Tuple
 from datetime import datetime
-import base64, os
 
 
 def get_latest_merkle_root(table_name: str) -> Optional[Tuple[str, datetime]]:
@@ -51,14 +50,17 @@ def compute_and_store_merkle_root(table_name: str, reference_table: str = None) 
         The computed Merkle root hash
     """
     cfg = get_config()
-    hashes = get_table_hashes(table_name)
-    
-    if not hashes:
-        print(f"[!] Table {table_name} has no rows")
-        return None
+    conn = get_connection()
 
-    tree = MerkleTree(hashes)
-    root = tree.get_root()
+    try:
+        # Re-use the robust reconstruction logic to get the state and root
+        state, root = reconstruct_table_state(conn, table_name)
+    finally:
+        conn.close()
+
+    if not root:
+        print(f"[!] Could not compute Merkle root for table {table_name}. It might be empty.")
+        return None
 
     # Sign the root
     priv_path = cfg["crypto"]["private_key_path"]
@@ -100,34 +102,3 @@ def compute_and_store_merkle_root(table_name: str, reference_table: str = None) 
     finally:
         cursor.close()
         conn.close()
-
-def get_table_hashes(table_name: str) -> list[str]:
-    """Get all row hashes from a table in chronological order."""
-    conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        cursor.execute(f"SELECT row_hash FROM {table_name} ORDER BY valid_from ASC")
-        return [row['row_hash'] for row in cursor.fetchall()]
-    finally:
-        cursor.close()
-        conn.close()
-
-def verify_table_with_merkle_root(table_name: str, root_hash: str) -> bool:
-    """
-    Recompute Merkle root from table and compare with stored root.
-    Returns True if matches.
-    """
-    hashes = get_table_hashes(table_name)
-    if not hashes:
-        return False
-
-    tree = MerkleTree(hashes)
-    computed_root = tree.get_root()
-    if computed_root == root_hash:
-        print(f"[✓] Table {table_name} matches Merkle root {root_hash}")
-        return True
-    else:
-        print(f"[!] Table {table_name} root mismatch!")
-        print(f"    Expected: {root_hash}")
-        print(f"    Computed: {computed_root}")
-        return False

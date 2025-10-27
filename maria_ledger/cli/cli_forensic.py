@@ -6,7 +6,7 @@ from rich.table import Table
 from pathlib import Path
 import json
 from maria_ledger.db.connection import get_connection
-from maria_ledger.db.temporal_utils import analyze_temporal_chain
+from maria_ledger.db.temporal_utils import analyze_universal_ledger_chain
 from maria_ledger.utils.formatter import pretty_time
 
 console = Console()
@@ -24,7 +24,7 @@ def forensic_command(
     looking for anomalies, gaps, or potential tampering evidence.
     """
     try:
-        report = analyze_temporal_chain(table_name)
+        report = analyze_universal_ledger_chain(table_name)
         
         if json_output:
             typer.echo(json.dumps(report, indent=2))

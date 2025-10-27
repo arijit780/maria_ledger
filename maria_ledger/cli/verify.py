@@ -1,5 +1,5 @@
 from maria_ledger.db.connection import get_connection
-from maria_ledger.db.merkle_service import verify_table_with_merkle_root, compute_and_store_merkle_root
+from maria_ledger.db.merkle_service import compute_and_store_merkle_root
 from maria_ledger.utils.config import get_config
 from maria_ledger.crypto.signer import verify_merkle_root_signature
 from maria_ledger.utils.keys import public_key_fingerprint_from_file
@@ -7,6 +7,7 @@ from maria_ledger.utils.logger import get_logger
 import typer
 import json
 
+from maria_ledger.cli.reconstruct import reconstruct_table_state
 logger = get_logger("cli-verify")
 
 def verify_table_command(
@@ -45,7 +46,14 @@ def verify_table_command(
     fingerprint = row["pubkey_fingerprint"]
 
     # 1) Verify the Merkle root matches current computed root
-    ok_root = verify_table_with_merkle_root(table, root)
+    # Reconstruct state from the ledger to get the current, correct Merkle root
+    conn = get_connection()
+    try:
+        _, computed_root = reconstruct_table_state(conn, table)
+    finally:
+        conn.close()
+
+    ok_root = (computed_root == root)
 
     # 2) Verify the signature using the configured public key path
     # Use provided public key or fall back to config
@@ -83,4 +91,3 @@ def verify_table_command(
             typer.echo("[✗] Integrity check failed! Investigate immediately.")
         else:
             typer.echo("[✓] Table verification passed (root + signature).")
-

@@ -1,4 +1,4 @@
-# temporal_utils.py
+# temporal_utils.py - Note: Parts of this file are for the old architecture.
 from datetime import datetime, timezone
 from collections import defaultdict, Counter
 from typing import List, Dict, Any, Tuple
@@ -10,8 +10,8 @@ def iso(ts):
         return ts.astimezone(timezone.utc).isoformat()
     return str(ts)
 
-# --- Core walker -------------------------------------------------------------
-def walk_chain(conn, table_name: str, batch_size: int = 10000):
+# --- Core walker (Old Architecture - for system-versioned tables) ----------------
+def walk_temporal_chain(conn, table_name: str, batch_size: int = 10000):
     """
     Walk rows ordered by valid_from.
     Yields rows as dicts with keys: id, row_hash, prev_hash, valid_from, ... 
@@ -29,7 +29,7 @@ def walk_chain(conn, table_name: str, batch_size: int = 10000):
             for r in rows:
                 yield r
 
-# --- Anomaly detections -----------------------------------------------------
+# --- Anomaly detections (Old Architecture) -------------------------------------
 def analyze_temporal_chain(table_name: str) -> Dict[str, Any]:
     """
     Returns a report with detected anomalies and a risk_score [0..100].
@@ -46,7 +46,7 @@ def analyze_temporal_chain(table_name: str) -> Dict[str, Any]:
         # For fork detection: map prev_hash -> list of row_hash that point to it
         prev_to_children = defaultdict(list)
 
-        for row in walk_chain(conn, table_name):
+        for row in walk_temporal_chain(conn, table_name):
             index += 1
             id_ = row.get("id")
             rh = row.get("row_hash")
@@ -154,5 +154,74 @@ def analyze_temporal_chain(table_name: str) -> Dict[str, Any]:
             "generated_at": datetime.now(timezone.utc).isoformat()
         }
         return report
+    finally:
+        conn.close()
+
+# --- Anomaly detections (New Universal Ledger Architecture) -------------------
+def analyze_universal_ledger_chain(table_name: str) -> Dict[str, Any]:
+    """
+    Analyzes the universal `ledger` table for a specific logical table.
+    Returns a report with detected anomalies and a risk_score [0..100].
+    """
+    conn = get_connection()
+    try:
+        anomalies = []
+        index = 0
+        prev_tx_order = 0
+        prev_created_at = None
+
+        sql = "SELECT tx_order, op_type, created_at FROM ledger WHERE table_name = %s ORDER BY tx_order ASC"
+        
+        with conn.cursor(dictionary=True, buffered=False) as cur:
+            cur.execute(sql, (table_name,))
+            
+            for row in cur:
+                index += 1
+                tx_order = row['tx_order']
+                created_at = row['created_at']
+
+                # 1. Check for gaps in the tx_order sequence
+                if prev_tx_order > 0 and tx_order != prev_tx_order + 1:
+                    anomalies.append({
+                        "type": "tx_order_gap",
+                        "index": index,
+                        "detail": f"Gap detected in tx_order. Jumped from {prev_tx_order} to {tx_order}."
+                    })
+
+                # 2. Check for timestamp non-monotonicity
+                if prev_created_at is not None and created_at < prev_created_at:
+                    anomalies.append({
+                        "type": "timestamp_non_monotonic",
+                        "index": index,
+                        "detail": f"Timestamp rewind detected. {iso(created_at)} is before previous {iso(prev_created_at)}."
+                    })
+
+                prev_tx_order = tx_order
+                prev_created_at = created_at
+
+        if index == 0:
+            return { "table": table_name, "rows_scanned": 0, "anomaly_count": 0, "anomalies": [], "risk_score": 0 }
+
+        # Risk scoring
+        score = 0
+        weight_map = {
+            "tx_order_gap": 50,
+            "timestamp_non_monotonic": 30,
+        }
+        for a in anomalies:
+            score += weight_map.get(a.get("type"), 10)
+        
+        risk_score = min(100, score)
+
+        report = {
+            "table": table_name,
+            "rows_scanned": index,
+            "anomaly_count": len(anomalies),
+            "anomalies": anomalies,
+            "risk_score": risk_score,
+            "generated_at": datetime.now(timezone.utc).isoformat()
+        }
+        return report
+
     finally:
         conn.close()
