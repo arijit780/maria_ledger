@@ -17,9 +17,9 @@ Functions:
 import typer
 import json
 import hashlib
-import mysql.connector
 import csv
 from rich.console import Console
+from typing import List, Optional
 from maria_ledger.crypto.merkle_tree import MerkleTree
 
 
@@ -27,9 +27,20 @@ from maria_ledger.crypto.merkle_tree import MerkleTree
 # === Canonicalization & Hashing Utilities ===================
 # ============================================================
 
+from datetime import datetime
+
+def json_serial(obj):
+    """Custom JSON serializer for objects not serializable by default json code, like datetime."""
+    if isinstance(obj, datetime):
+        # Use isoformat() to include microseconds for full precision.
+        return obj.isoformat()
+    raise TypeError(f"Type {type(obj)} not serializable")
+
 def canonicalize_json(obj):
     """Return deterministic JSON bytes with sorted keys and compact form."""
-    return json.dumps(obj, separators=(',', ':'), sort_keys=True).encode('utf-8')
+    # Use a custom default serializer to handle datetimes with full precision.
+    # This ensures that hashes are consistent between reconstructed and live states.
+    return json.dumps(obj, separators=(',', ':'), sort_keys=True, default=json_serial).encode('utf-8')
 
 
 def compute_row_hash(record_id, payload_json):
@@ -60,16 +71,29 @@ def db_stream_query(conn, sql, params):
             )
 
 
-def load_ledger_stream(conn, table_name, as_of_tx_order=None):
+def load_ledger_stream(conn, table_name, filters: Optional[List[str]] = None):
     """Yield ledger entries ordered by tx_order for a given table (streaming)."""
     sql = (
         "SELECT tx_order, record_id, op_type, old_payload, new_payload "
         "FROM ledger WHERE table_name = %s"
     )
     params = [table_name]
-    if as_of_tx_order is not None:
-        sql += " AND tx_order <= %s"
-        params.append(as_of_tx_order)
+
+    if filters:
+        filter_clauses = []
+        # This is a simple implementation for equality. It can be expanded
+        # to support operators like '>', '<', 'LIKE'.
+        for f in filters:
+            if ":" not in f:
+                raise ValueError(f"Invalid filter format: '{f}'. Expected 'key:value'.")
+            key, value = f.split(":", 1)
+            # Basic validation to prevent injection on column names
+            if not key.replace("_", "").isalnum():
+                raise ValueError(f"Invalid filter key: {key}")
+            filter_clauses.append(f"{key} = %s")
+            params.append(value)
+        sql += " AND " + " AND ".join(filter_clauses)
+
     sql += " ORDER BY tx_order ASC"
     for row in db_stream_query(conn, sql, params):
         yield row
@@ -78,6 +102,33 @@ def load_ledger_stream(conn, table_name, as_of_tx_order=None):
 # ============================================================
 # === State Reconstruction ===================================
 # ============================================================
+
+def _parse_payload(payload):
+    """
+    Recursively parse a JSON payload to convert timestamp strings to datetime objects.
+    This ensures data types are consistent with live table reads.
+    """
+    if not payload:
+        return None
+    
+    # If the payload from the DB is a string, parse it into a dictionary first.
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return payload # Return as-is if not valid JSON
+    for key, value in payload.items():
+        # Handle nested dictionaries/objects if they exist
+        if isinstance(value, dict):
+            payload[key] = _parse_payload(value)
+        if isinstance(value, str):
+            # Attempt to parse strings that look like timestamps
+            if key in ('created_at', 'updated_at') or 'at' in key:
+                try:
+                    payload[key] = datetime.fromisoformat(value.replace(' ', 'T'))
+                except (ValueError, TypeError):
+                    pass  # Not a timestamp string, leave as is
+    return payload
 
 def apply_ops_to_state(ledger_stream):
     """
@@ -91,9 +142,9 @@ def apply_ops_to_state(ledger_stream):
     state = {}
     for tx_order, record_id, op_type, old_payload, new_payload in ledger_stream:
         if op_type == 'INSERT':
-            state[record_id] = new_payload
+            state[record_id] = _parse_payload(new_payload)
         elif op_type == 'UPDATE':
-            state[record_id] = new_payload
+            state[record_id] = _parse_payload(new_payload)
         elif op_type == 'DELETE':
             state.pop(record_id, None)
         else:
@@ -141,14 +192,15 @@ def write_state_to_csv(state_dict, filepath):
 # === Example Usage (programmatic) ============================
 # ============================================================
 
-def reconstruct_table_state(conn, table_name, as_of_tx_order=None, out_csv=None):
+def reconstruct_table_state(conn, table_name, out_csv=None, filters: Optional[List[str]] = None):
     """
     High-level function to reconstruct table state and compute Merkle root.
 
     Returns:
         tuple: (state_dict, merkle_root_hex)
     """
-    ledger_stream = load_ledger_stream(conn, table_name, as_of_tx_order)
+    # Pass filters down to the stream loader
+    ledger_stream = load_ledger_stream(conn, table_name, filters)
     state = apply_ops_to_state(ledger_stream)
     merkle_root = build_merkle_root_from_state(state)
 
@@ -166,8 +218,8 @@ console = Console()
 
 def reconstruct_command(
     table_name: str = typer.Argument(..., help="The logical table name within the ledger."),
-    as_of_tx_order: int = typer.Option(None, help="Reconstruct state as of a specific transaction order."),
-    out_csv: str = typer.Option(None, "--out-csv", help="Path to write the reconstructed state as a CSV file.")
+    out_csv: str = typer.Option(None, "--out-csv", help="Path to write the reconstructed state as a CSV file."),
+    filters: Optional[List[str]] = typer.Option(None, "--filter", help="Filter by 'key:value'. Can be used multiple times.")
 ):
     """
     Reconstruct a table's state from the ledger and print its Merkle root.
@@ -177,7 +229,7 @@ def reconstruct_command(
 
     try:
         console.print(f"Reconstructing state for [bold cyan]{table_name}[/]...")
-        state, merkle_root = reconstruct_table_state(conn, table_name, as_of_tx_order, out_csv)
+        state, merkle_root = reconstruct_table_state(conn, table_name, out_csv, filters)
         console.print(f"\n[green]Reconstruction Complete[/green]")
         console.print(f"  - Records in final state: {len(state)}")
         console.print(f"  - Merkle Root: [bold white]{merkle_root}[/bold white]")

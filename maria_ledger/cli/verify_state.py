@@ -8,44 +8,63 @@ from maria_ledger.crypto.merkle_tree import MerkleTree
 
 import typer
 from rich.console import Console
+from typing import List, Optional
 
 from maria_ledger.db.connection import get_connection
 from maria_ledger.cli.reconstruct import (
     reconstruct_table_state,
     build_merkle_root_from_state,
-    compute_row_hash,
+    compute_row_hash, _parse_payload,
     db_stream_query
 )
 
 console = Console()
 
 
-def load_current_state_stream(conn, table_name):
+def load_current_state_stream(conn, table_name, filters: Optional[List[str]] = None):
     """
     Generator that yields rows from the current state of a table.
     Assumes the table has a primary key column named 'id'.
     """
     # Assuming 'id' is the primary key and other columns are the payload.
     # This needs to be adapted if the schema is different.
-    sql = f"SELECT * FROM {table_name} ORDER BY id"
+    sql = f"SELECT * FROM {table_name}"
+    params = []
+
+    if filters:
+        filter_clauses = []
+        for f in filters:
+            if ":" not in f:
+                raise ValueError(f"Invalid filter format: '{f}'. Expected 'key:value'.")
+            key, value = f.split(":", 1)
+            # Basic validation to prevent injection on column names
+            if not key.replace("_", "").isalnum():
+                raise ValueError(f"Invalid filter key: {key}")
+            filter_clauses.append(f"{key} = %s")
+            params.append(value)
+        sql += " WHERE " + " AND ".join(filter_clauses)
+
+    sql += " ORDER BY id"
+
     # Use a dictionary cursor and unbuffered to stream results
     with conn.cursor(dictionary=True, buffered=False) as cur:
-        cur.execute(sql)
+        cur.execute(sql, params)
         for row in cur:
             record_id = str(row['id'])
             # Exclude the 'id' from the payload for hashing
             payload = {k: v for k, v in row.items() if k != 'id'}
-            yield record_id, payload
+            # Ensure datetime objects are handled consistently with reconstruction
+            yield record_id, _parse_payload(payload)
 
 
-def get_merkle_root_of_current_state(conn, table_name):
+def get_merkle_root_of_current_state(conn, table_name, filters: Optional[List[str]] = None):
     """
     Computes the Merkle root of the current state of a given table.
     """
     # Stream hashes directly into the Merkle tree builder to save memory.
     hashes = [
         compute_row_hash(record_id, payload)
-        for record_id, payload in load_current_state_stream(conn, table_name)
+        for record_id, payload in load_current_state_stream(conn, table_name, filters)
     ]
     return MerkleTree(hashes).get_root()
 
@@ -57,48 +76,54 @@ def find_discrepancies(reconstructed_state: dict, live_state_stream):
     """
     issues = []
     # Create sorted iterators for both sources
-    recon_iter = iter(sorted(reconstructed_state.items()))
+    # Sort by integer value of the key to ensure correct numerical order.
+    recon_iter = iter(sorted(reconstructed_state.items(), key=lambda item: int(item[0])))
     live_iter = live_state_stream  # Assumes live stream is already sorted by ID
 
-    try:
-        recon_id, recon_payload = next(recon_iter)
-    except StopIteration:
-        recon_id = None
-    try:
-        live_id, live_payload = next(live_iter)
-    except StopIteration:
-        live_id = None
+    # Helper functions to safely get the next item from an iterator
+    def get_next(it):
+        try:
+            return next(it)
+        except StopIteration:
+            return None, None
+
+    recon_id, recon_payload = get_next(recon_iter)
+    live_id, live_payload = get_next(live_iter)
 
     while recon_id is not None or live_id is not None:
-        if recon_id is not None and (live_id is None or recon_id < live_id):
+        # Compare IDs as integers for correct numerical comparison.
+        recon_id_int = int(recon_id) if recon_id is not None else None
+        live_id_int = int(live_id) if live_id is not None else None
+
+        # Case 1: Reconstructed ID is smaller or live stream is exhausted.
+        # This means the record is in the ledger but missing from the live table.
+        if recon_id_int is not None and (live_id_int is None or recon_id_int < live_id_int):
             issues.append(f"MISSING in live table: ID {recon_id}")
-            try:
-                recon_id, recon_payload = next(recon_iter)
-            except StopIteration:
-                recon_id = None
-        elif live_id is not None and (recon_id is None or live_id < recon_id):
+            recon_id, recon_payload = get_next(recon_iter)
+
+        # Case 2: Live ID is smaller or reconstructed stream is exhausted.
+        # This means the record is in the live table but not in the ledger history.
+        elif live_id_int is not None and (recon_id_int is None or live_id_int < recon_id_int):
             issues.append(f"EXTRA in live table (not in ledger): ID {live_id}")
-            try:
-                live_id, live_payload = next(live_iter)
-            except StopIteration:
-                live_id = None
-        else:  # Both are not None and IDs match
+            live_id, live_payload = get_next(live_iter)
+
+        # Case 3: IDs match. Now we compare the content.
+        elif recon_id_int == live_id_int:
             recon_hash = compute_row_hash(recon_id, recon_payload)
             live_hash = compute_row_hash(live_id, live_payload)
             if recon_hash != live_hash:
                 issues.append(f"HASH MISMATCH for ID {live_id}")
-            try:
-                recon_id, recon_payload = next(recon_iter)
-                live_id, live_payload = next(live_iter)
-            except StopIteration:
-                recon_id, live_id = None, None
+            
+            # Advance both iterators
+            recon_id, recon_payload = get_next(recon_iter)
+            live_id, live_payload = get_next(live_iter)
 
     return issues
 
 
 def verify_state_command(
     table_name: str = typer.Argument(..., help="The name of the live table to verify (e.g., 'customers')"),
-    as_of_tx_order: int = typer.Option(None, help="Verify state as of a specific ledger transaction order."),
+    filters: Optional[List[str]] = typer.Option(None, "--filter", help="Filter by 'key:value'. Can be used multiple times.")
 ):
     """
     Verify a table's current state against the immutable ledger.
@@ -109,12 +134,12 @@ def verify_state_command(
     try:
         # 1. Reconstruct state from the ledger
         console.print("Reconstructing state from ledger...")
-        reconstructed_state, reconstructed_root = reconstruct_table_state(conn, table_name, as_of_tx_order)
+        reconstructed_state, reconstructed_root = reconstruct_table_state(conn, table_name, filters=filters)
         console.print(f"  [green]✓[/green] Reconstructed Merkle root: [bold]{reconstructed_root}[/]")
 
         # 2. Compute Merkle root from the live table
         console.print(f"Computing Merkle root from live table '{table_name}'...")
-        live_root = get_merkle_root_of_current_state(conn, table_name)
+        live_root = get_merkle_root_of_current_state(conn, table_name, filters=filters)
         console.print(f"  [green]✓[/green] Live table Merkle root: [bold]{live_root}[/]")
 
         # 3. Compare roots
@@ -123,10 +148,17 @@ def verify_state_command(
         else:
             console.print("\n[bold red]❌ FAILURE: State mismatch detected![/bold red]")
             console.print("Finding discrepancies...")
-            discrepancies = find_discrepancies(reconstructed_state, load_current_state_stream(conn, table_name))
-            for issue in discrepancies:
-                console.print(f"  - [yellow]{issue}[/yellow]")
-            raise typer.Exit(code=1)
+            live_stream = load_current_state_stream(conn, table_name, filters=filters)
+            try:
+                discrepancies = find_discrepancies(reconstructed_state, live_stream)
+                for issue in discrepancies:
+                    console.print(f"  - [yellow]{issue}[/yellow]")
+                raise typer.Exit(code=1)
+            finally:
+                # This is crucial: ensure the generator is fully consumed
+                # to prevent the "Unread result found" error with unbuffered cursors.
+                from collections import deque
+                deque(live_stream, maxlen=0)
 
     finally:
         conn.close()

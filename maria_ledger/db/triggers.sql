@@ -1,183 +1,92 @@
--- ============================================
--- Reset environment
--- ============================================
-SET FOREIGN_KEY_CHECKS=0;
+-- Maria-Ledger Universal Ledger Setup
+--
+-- This script sets up the database schema for the event-sourcing architecture.
+-- It creates a universal `ledger` table to immutably store all changes,
+-- a `ledger_roots` table for Merkle checkpoints, and an example `customers`
+-- table with triggers that automatically populate the ledger.
 
--- Initialize hash chain session variables
-SET @last_customer_hash = NULL;
-SET @last_order_hash = NULL;
-
--- First drop triggers if they exist
-DROP TRIGGER IF EXISTS trg_orders_hash_update;
-DROP TRIGGER IF EXISTS trg_orders_hash_insert;
-DROP TRIGGER IF EXISTS trg_customers_hash_update;
-DROP TRIGGER IF EXISTS trg_customers_hash_insert;
-
--- Then drop tables
-DROP TABLE IF EXISTS ledger_orders;
+-- Drop old tables if they exist to prevent conflicts with the new design.
 DROP TABLE IF EXISTS ledger_customers;
 DROP TABLE IF EXISTS ledger_roots;
+DROP TABLE IF EXISTS ledger;
+DROP TABLE IF EXISTS customers;
 
-SET FOREIGN_KEY_CHECKS=1;
 
--- ============================================
--- Tamper-evident ledger_customers table
--- ============================================
-CREATE TABLE ledger_customers (
-    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
-    name            VARCHAR(255),
-    email           VARCHAR(255),
-    valid_from      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
-    valid_to        TIMESTAMP(6) NULL,
-    row_hash        CHAR(64),
-    prev_hash       CHAR(64)
-) WITH SYSTEM VERSIONING;
+-- ----------------------------------------------------------------------------
+-- 1. The Universal Ledger Table
+-- This table is the single source of truth for all changes in the system.
+-- It is used by `reconstruct.py` and `verify_state.py`.
+-- ----------------------------------------------------------------------------
+CREATE TABLE ledger (
+    tx_order BIGINT AUTO_INCREMENT PRIMARY KEY,
+    tx_id VARCHAR(36) NOT NULL,
+    table_name VARCHAR(255) NOT NULL,
+    record_id VARCHAR(255) NOT NULL,
+    op_type ENUM('INSERT', 'UPDATE', 'DELETE') NOT NULL,
+    old_payload JSON,
+    new_payload JSON,
+    created_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
+    INDEX (table_name, record_id, tx_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- ============================================
--- Trigger: hash chaining on INSERT
--- ============================================
-DELIMITER //
 
--- Initialize session variable if not exists
-SET @last_customer_hash = NULL;
-
-CREATE TRIGGER trg_customers_hash_insert
-BEFORE INSERT ON ledger_customers
-FOR EACH ROW
-BEGIN
-    DECLARE last_hash CHAR(64);
-    DECLARE last_id BIGINT;
-    
-    -- -- Start a read-only transaction for consistency
-    -- START TRANSACTION READ ONLY;
-    
-    -- Get the last ID with a lock
-    SELECT MAX(id) INTO last_id 
-    FROM ledger_customers 
-    FOR UPDATE;
-    
-    IF last_id IS NULL THEN
-        -- First row
-        SET NEW.prev_hash = REPEAT('0', 64);
-    ELSE
-        -- Get the hash of the last row with a lock
-        SELECT row_hash INTO last_hash
-        FROM ledger_customers 
-        WHERE id = last_id
-        FOR UPDATE;
-        
-        SET NEW.prev_hash = IFNULL(last_hash, REPEAT('0',64));
-    END IF;
-    
-    -- COMMIT;
-    
-    -- Calculate new row hash
-    SET NEW.row_hash = LOWER(SHA2(CONCAT(
-        NEW.name, NEW.email, NEW.valid_from, NEW.prev_hash
-    ), 256));
-END;
-//
-
--- ============================================
--- Trigger: hash chaining on UPDATE
--- ============================================
-CREATE TRIGGER trg_customers_hash_update
-BEFORE UPDATE ON ledger_customers
-FOR EACH ROW
-BEGIN
-    SET NEW.prev_hash = OLD.row_hash;
-    SET NEW.row_hash = LOWER(SHA2(CONCAT(
-        NEW.name, NEW.email, NEW.valid_from, NEW.prev_hash
-    ), 256));
-END;
-//
-DELIMITER ;
-
--- ============================================
--- Tamper-evident ledger_orders table
--- ============================================
-CREATE TABLE ledger_orders (
-    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
-    customer_id     BIGINT,
-    amount          DECIMAL(10,2),
-    status          VARCHAR(50),
-    valid_from      TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
-    valid_to        TIMESTAMP(6) NULL,
-    row_hash        CHAR(64),
-    prev_hash       CHAR(64),
-    FOREIGN KEY (customer_id) REFERENCES ledger_customers(id)
-) WITH SYSTEM VERSIONING;
-
--- ============================================
--- Trigger: hash chaining on INSERT for orders
--- ============================================
-DELIMITER //
-
--- Initialize session variable if not exists
-SET @last_order_hash = NULL;
-
-CREATE TRIGGER trg_orders_hash_insert
-BEFORE INSERT ON ledger_orders
-FOR EACH ROW
-BEGIN
-    DECLARE last_hash CHAR(64);
-    DECLARE last_id BIGINT;
-    
-    -- Get the last ID with a lock
-    SELECT IFNULL(MAX(id), 0) INTO last_id 
-    FROM ledger_orders LOCK IN SHARE MODE;
-    
-    IF last_id = 0 THEN
-        -- First row
-        SET NEW.prev_hash = REPEAT('0', 64);
-    ELSE
-        -- Get the hash of the last row with a lock
-        SELECT row_hash INTO last_hash
-        FROM ledger_orders 
-        WHERE id = last_id
-        LOCK IN SHARE MODE;
-        
-        SET NEW.prev_hash = IFNULL(last_hash, REPEAT('0',64));
-    END IF;
-    
-    -- Calculate new row hash
-    SET NEW.row_hash = LOWER(SHA2(CONCAT(
-        NEW.customer_id, NEW.amount, NEW.status, NEW.valid_from, NEW.prev_hash
-    ), 256));
-END;
-//
-
--- ============================================
--- Trigger: hash chaining on UPDATE for orders
--- ============================================
-CREATE TRIGGER trg_orders_hash_update
-BEFORE UPDATE ON ledger_orders
-FOR EACH ROW
-BEGIN
-    SET NEW.prev_hash = OLD.row_hash;
-    SET NEW.row_hash = LOWER(SHA2(CONCAT(
-        NEW.customer_id, NEW.amount, NEW.status, NEW.valid_from, NEW.prev_hash
-    ), 256));
-END;
-//
-
-DELIMITER ;
-
--- ============================================
--- Ledger roots table (Merkle root storage)
--- ============================================
+-- ----------------------------------------------------------------------------
+-- 2. The Merkle Roots Checkpoint Table
+-- This table stores the cryptographic checkpoints of your data tables.
+-- It is used by `merkle_service.py`.
+-- ----------------------------------------------------------------------------
 CREATE TABLE ledger_roots (
-    table_name VARCHAR(255),
-    root_hash CHAR(64),
-    reference_root CHAR(64) NULL,
-    reference_table VARCHAR(255) NULL,
-    computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(6),
-    signature TEXT,
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    table_name VARCHAR(255) NOT NULL,
+    root_hash VARCHAR(64) NOT NULL,
+    computed_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
+    reference_root VARCHAR(64),
+    reference_table VARCHAR(255),
     signer VARCHAR(255),
-    pubkey_fingerprint CHAR(64),
-    PRIMARY KEY(table_name, computed_at),
-    CONSTRAINT chk_reference_integrity CHECK (
-        (reference_root IS NULL AND reference_table IS NULL) OR 
-        (reference_root IS NOT NULL AND reference_table IS NOT NULL)
-    )
-);
+    signature TEXT,
+    pubkey_fingerprint VARCHAR(64),
+    INDEX (table_name, computed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- ----------------------------------------------------------------------------
+-- 3. An Example "Live" Table (`customers`)
+-- This is a standard table for your application's data.
+-- Triggers on this table will automatically write audit events to the `ledger`.
+-- ----------------------------------------------------------------------------
+CREATE TABLE customers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- ----------------------------------------------------------------------------
+-- 4. Triggers to Populate the Universal Ledger
+-- ----------------------------------------------------------------------------
+
+DELIMITER $$
+CREATE TRIGGER customers_after_insert AFTER INSERT ON customers FOR EACH ROW
+BEGIN
+    -- The payload should contain only the data, not the primary key itself.
+    -- The `NEW` object contains the final state of the row after the INSERT.
+    INSERT INTO ledger (tx_id, table_name, record_id, op_type, new_payload)
+    VALUES (UUID(), 'customers', NEW.id, 'INSERT', JSON_OBJECT('name', NEW.name, 'email', NEW.email, 'created_at', NEW.created_at, 'updated_at', NEW.updated_at));
+END$$
+
+CREATE TRIGGER customers_after_update AFTER UPDATE ON customers FOR EACH ROW
+BEGIN
+    -- The `OLD` object has the state before the update, `NEW` has the state after. This is correct.
+    INSERT INTO ledger (tx_id, table_name, record_id, op_type, old_payload, new_payload)
+    VALUES (UUID(), 'customers', NEW.id, 'UPDATE', JSON_OBJECT('name', OLD.name, 'email', OLD.email, 'created_at', OLD.created_at, 'updated_at', OLD.updated_at), JSON_OBJECT('name', NEW.name, 'email', NEW.email, 'created_at', NEW.created_at, 'updated_at', NEW.updated_at));
+END$$
+
+CREATE TRIGGER customers_after_delete AFTER DELETE ON customers FOR EACH ROW
+BEGIN
+    INSERT INTO ledger (tx_id, table_name, record_id, op_type, old_payload)
+    -- The `OLD` object correctly represents the state of the row just before it was deleted.
+    VALUES (UUID(), 'customers', OLD.id, 'DELETE', JSON_OBJECT('name', OLD.name, 'email', OLD.email, 'created_at', OLD.created_at, 'updated_at', OLD.updated_at));
+END$$
+DELIMITER ;
