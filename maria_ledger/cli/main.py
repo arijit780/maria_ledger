@@ -2,11 +2,16 @@ import typer
 from typing import List, Optional
 from maria_ledger.cli.verify import verify_table_command
 from maria_ledger.cli.audit import run as audit_command
-from maria_ledger.cli.append import append_record_command
-from maria_ledger.cli.trustmap import trustmap_command
+# from maria_ledger.cli.append import append_record_command
+# from maria_ledger.cli.trustmap import trustmap_command
 from maria_ledger.cli.cli_forensic import forensic_command
 from maria_ledger.cli.reconstruct import reconstruct_command
+from maria_ledger.cli.bootstrap import bootstrap_command
 from maria_ledger.cli.verify_state import verify_state_command
+from maria_ledger.cli.verify_chain import verify_chain_command
+from maria_ledger.cli.snapshot import snapshot_command
+from maria_ledger.cli.verify_snapshot import verify_snapshot_command
+from maria_ledger.cli.timeline import timeline_command
 
 app = typer.Typer(help="Maria-Ledger CLI — verify and audit tamper-evident ledgers.")
 
@@ -16,7 +21,12 @@ app.command("audit")(audit_command)
 # app.command("append")(append_record_command)
 # app.command("trustmap")(trustmap_command)
 app.command("forensic")(forensic_command)
-
+app.command("bootstrap")(bootstrap_command)
+app.command("verify-chain")(verify_chain_command)
+app.command("snapshot")(snapshot_command)
+app.command("verify-snapshot")(verify_snapshot_command)
+app.command("timeline")(timeline_command)
+#maria-ledger timeline customers --id 15
 # We need to wrap the commands in a function to add the new shared option
 @app.command("reconstruct")
 def reconstruct_with_filter(

@@ -20,32 +20,32 @@ import hashlib
 import csv
 from rich.console import Console
 from typing import List, Optional
+from datetime import datetime
+
 from maria_ledger.crypto.merkle_tree import MerkleTree
+from maria_ledger.utils.helpers import canonicalize_json, parse_filters
 
 
 # ============================================================
 # === Canonicalization & Hashing Utilities ===================
 # ============================================================
 
-from datetime import datetime
 
-def json_serial(obj):
-    """Custom JSON serializer for objects not serializable by default json code, like datetime."""
-    if isinstance(obj, datetime):
-        # Use isoformat() to include microseconds for full precision.
-        return obj.isoformat()
-    raise TypeError(f"Type {type(obj)} not serializable")
+def compute_row_hash(record_id, payload_json, fields_to_hash: Optional[List[str]] = None):
+    """
+    Compute SHA-256 hash for a given record.
+    Hashes record_id and a subset of payload fields if specified.
+    """
+    if fields_to_hash:
+        # Filter the payload to include only the specified fields, sorted for determinism.
+        # Using .get(k) ensures that if a field is missing, it's treated as None, which is consistent.
+        filtered_payload = {k: payload_json.get(k) for k in sorted(fields_to_hash)}
+        payload_to_hash = filtered_payload
+    else:
+        # Hash the entire payload if no specific fields are given (maintains old behavior).
+        payload_to_hash = payload_json
 
-def canonicalize_json(obj):
-    """Return deterministic JSON bytes with sorted keys and compact form."""
-    # Use a custom default serializer to handle datetimes with full precision.
-    # This ensures that hashes are consistent between reconstructed and live states.
-    return json.dumps(obj, separators=(',', ':'), sort_keys=True, default=json_serial).encode('utf-8')
-
-
-def compute_row_hash(record_id, payload_json):
-    """Compute SHA-256 hash for a given record (id + canonicalized JSON)."""
-    data = f"{record_id}|{canonicalize_json(payload_json).decode('utf-8')}"
+    data = f"{record_id}|{canonicalize_json(payload_to_hash).decode('utf-8')}"
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
 
@@ -79,20 +79,9 @@ def load_ledger_stream(conn, table_name, filters: Optional[List[str]] = None):
     )
     params = [table_name]
 
-    if filters:
-        filter_clauses = []
-        # This is a simple implementation for equality. It can be expanded
-        # to support operators like '>', '<', 'LIKE'.
-        for f in filters:
-            if ":" not in f:
-                raise ValueError(f"Invalid filter format: '{f}'. Expected 'key:value'.")
-            key, value = f.split(":", 1)
-            # Basic validation to prevent injection on column names
-            if not key.replace("_", "").isalnum():
-                raise ValueError(f"Invalid filter key: {key}")
-            filter_clauses.append(f"{key} = %s")
-            params.append(value)
-        sql += " AND " + " AND ".join(filter_clauses)
+    filter_sql, filter_params = parse_filters(filters)
+    sql += filter_sql
+    params.extend(filter_params)
 
     sql += " ORDER BY tx_order ASC"
     for row in db_stream_query(conn, sql, params):
@@ -152,7 +141,7 @@ def apply_ops_to_state(ledger_stream):
     return state
 
 
-def build_merkle_root_from_state(state_dict):
+def build_merkle_root_from_state(state_dict, fields_to_hash: Optional[List[str]] = None):
     """
     Compute deterministic Merkle root from reconstructed state.
 
@@ -164,7 +153,7 @@ def build_merkle_root_from_state(state_dict):
     hashes = []
     for record_id in sorted(state_dict.keys()):
         payload = state_dict[record_id]
-        row_hash = compute_row_hash(record_id, payload)
+        row_hash = compute_row_hash(record_id, payload, fields_to_hash=fields_to_hash)
         hashes.append(row_hash)
 
     # Use the centralized MerkleTree class
@@ -192,7 +181,7 @@ def write_state_to_csv(state_dict, filepath):
 # === Example Usage (programmatic) ============================
 # ============================================================
 
-def reconstruct_table_state(conn, table_name, out_csv=None, filters: Optional[List[str]] = None):
+def reconstruct_table_state(conn, table_name, out_csv=None, filters: Optional[List[str]] = None, fields_to_hash: Optional[List[str]] = None):
     """
     High-level function to reconstruct table state and compute Merkle root.
 
@@ -202,7 +191,7 @@ def reconstruct_table_state(conn, table_name, out_csv=None, filters: Optional[Li
     # Pass filters down to the stream loader
     ledger_stream = load_ledger_stream(conn, table_name, filters)
     state = apply_ops_to_state(ledger_stream)
-    merkle_root = build_merkle_root_from_state(state)
+    merkle_root = build_merkle_root_from_state(state, fields_to_hash=fields_to_hash)
 
     if out_csv:
         write_state_to_csv(state, out_csv)

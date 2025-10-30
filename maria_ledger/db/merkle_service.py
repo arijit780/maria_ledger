@@ -2,8 +2,8 @@ from maria_ledger.db.connection import get_connection
 from maria_ledger.utils.config import get_config
 from maria_ledger.utils.keys import public_key_fingerprint_from_file, load_private_key
 from maria_ledger.crypto.signer import sign_merkle_root
-from maria_ledger.cli.reconstruct import reconstruct_table_state
 from typing import Optional, Tuple
+from maria_ledger.crypto.merkle_tree import MerkleTree
 from datetime import datetime
 
 
@@ -38,6 +38,27 @@ def get_latest_merkle_root(table_name: str) -> Optional[Tuple[str, datetime]]:
         cursor.close()
         conn.close()
 
+def compute_root_from_chain_hashes(conn, table_name: str) -> Optional[str]:
+    """
+    Computes a Merkle root directly from the `chain_hash` values in the ledger.
+    This is more efficient than state reconstruction and verifies the entire history.
+    """
+    cursor = conn.cursor()
+    try:
+        # Fetch all chain_hash values in their exact order.
+        cursor.execute(
+            "SELECT chain_hash FROM ledger WHERE table_name = %s ORDER BY tx_order ASC",
+            (table_name,)
+        )
+        # The result is a list of tuples, e.g., [('hash1',), ('hash2',)]
+        hashes = [row[0] for row in cursor.fetchall() if row[0] is not None]
+        
+        if not hashes:
+            return None
+        return MerkleTree(hashes).get_root()
+    finally:
+        cursor.close()
+
 def compute_and_store_merkle_root(table_name: str, reference_table: str = None) -> str:
     """
     Compute and store a new Merkle root for the given table.
@@ -53,8 +74,8 @@ def compute_and_store_merkle_root(table_name: str, reference_table: str = None) 
     conn = get_connection()
 
     try:
-        # Re-use the robust reconstruction logic to get the state and root
-        state, root = reconstruct_table_state(conn, table_name)
+        # Phase 3 Change: Compute root from the ledger's chain_hash values.
+        root = compute_root_from_chain_hashes(conn, table_name)
     finally:
         conn.close()
 

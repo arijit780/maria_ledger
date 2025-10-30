@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from collections import defaultdict, Counter
 from typing import List, Dict, Any, Tuple
 import json
+import hashlib
 from maria_ledger.db.connection import get_connection
 
 def iso(ts):
@@ -169,14 +170,18 @@ def analyze_universal_ledger_chain(table_name: str) -> Dict[str, Any]:
         index = 0
         prev_tx_order = 0
         prev_created_at = None
+        prev_row_hash = None
+        seen_tx_ids = set()
 
-        sql = "SELECT tx_order, op_type, created_at FROM ledger WHERE table_name = %s ORDER BY tx_order ASC"
+        sql = "SELECT tx_id, tx_order, op_type, record_id, old_payload, new_payload, created_at FROM ledger WHERE table_name = %s ORDER BY tx_order ASC"
         
         with conn.cursor(dictionary=True, buffered=False) as cur:
             cur.execute(sql, (table_name,))
             
-            for row in cur:
+            rows = list(cur)
+            for i, row in enumerate(rows):
                 index += 1
+                tx_id = row['tx_id']
                 tx_order = row['tx_order']
                 created_at = row['created_at']
 
@@ -196,8 +201,36 @@ def analyze_universal_ledger_chain(table_name: str) -> Dict[str, Any]:
                         "detail": f"Timestamp rewind detected. {iso(created_at)} is before previous {iso(prev_created_at)}."
                     })
 
+                # 3. Check for duplicate tx_id
+                if tx_id in seen_tx_ids:
+                    anomalies.append({
+                        "type": "duplicate_tx_id",
+                        "index": index,
+                        "detail": f"Duplicate tx_id {tx_id} found."
+                    })
+                seen_tx_ids.add(tx_id)
+
+                # 4. Hash chain verification
+                current_row_hash = hashlib.sha256(
+                    (
+                        str(row.get('old_payload', 'n/a')) +
+                        str(row.get('new_payload', 'n/a')) +
+                        str(row.get('op_type', 'n/a')) +
+                        str(row.get('record_id', 'n/a')) +
+                        str(iso(row.get('created_at', 'n/a')))
+                    ).encode('utf-8')
+                ).hexdigest()
+
+                if i > 0 and prev_row_hash != tx_id:
+                     anomalies.append({
+                        "type": "hash_chain_mismatch",
+                        "index": index,
+                        "detail": f"Hash chain broken at tx_order {tx_order}. Expected {prev_row_hash} but got {tx_id}."
+                    })
+
                 prev_tx_order = tx_order
                 prev_created_at = created_at
+                prev_row_hash = current_row_hash
 
         if index == 0:
             return { "table": table_name, "rows_scanned": 0, "anomaly_count": 0, "anomalies": [], "risk_score": 0 }
@@ -207,6 +240,8 @@ def analyze_universal_ledger_chain(table_name: str) -> Dict[str, Any]:
         weight_map = {
             "tx_order_gap": 50,
             "timestamp_non_monotonic": 30,
+            "duplicate_tx_id": 40,
+            "hash_chain_mismatch": 60,
         }
         for a in anomalies:
             score += weight_map.get(a.get("type"), 10)

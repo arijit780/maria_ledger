@@ -1,92 +1,173 @@
--- Maria-Ledger Universal Ledger Setup
---
--- This script sets up the database schema for the event-sourcing architecture.
--- It creates a universal `ledger` table to immutably store all changes,
--- a `ledger_roots` table for Merkle checkpoints, and an example `customers`
--- table with triggers that automatically populate the ledger.
+-- Maria-Ledger: Schema with Hash-Chained Ledger (collation-fixed)
+-- --------------------------------------------------------
+-- This script is designed to be idempotent and safe for re-application.
+-- It enforces a consistent utf8mb4_general_ci collation and keeps the
+-- safe chain-append procedure and triggers.
 
--- Drop old tables if they exist to prevent conflicts with the new design.
-DROP TABLE IF EXISTS ledger_customers;
+-- Drop tables in reverse order of dependency to ensure a clean slate.
+DROP TABLE IF EXISTS customers;
 DROP TABLE IF EXISTS ledger_roots;
 DROP TABLE IF EXISTS ledger;
-DROP TABLE IF EXISTS customers;
-
 
 -- ----------------------------------------------------------------------------
--- 1. The Universal Ledger Table
--- This table is the single source of truth for all changes in the system.
--- It is used by `reconstruct.py` and `verify_state.py`.
+-- 0. Optional: ensure database default charset/collation (uncomment if desired)
 -- ----------------------------------------------------------------------------
-CREATE TABLE ledger (
+-- ALTER DATABASE `ledger_demo` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+
+-- ----------------------------------------------------------------------------
+-- 1. Universal Ledger Table (with chain)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ledger (
     tx_order BIGINT AUTO_INCREMENT PRIMARY KEY,
     tx_id VARCHAR(36) NOT NULL,
-    table_name VARCHAR(255) NOT NULL,
-    record_id VARCHAR(255) NOT NULL,
-    op_type ENUM('INSERT', 'UPDATE', 'DELETE') NOT NULL,
+    table_name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
+    record_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
+    op_type ENUM('INSERT','UPDATE','DELETE') NOT NULL,
     old_payload JSON,
     new_payload JSON,
-    created_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
-    INDEX (table_name, record_id, tx_order)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
 
+    -- Chain protection columns
+    prev_hash CHAR(64) NULL,
+    chain_hash CHAR(64) NULL,
+
+    UNIQUE KEY uq_tx_id (tx_id),
+    INDEX idx_ledger_lookup (table_name, record_id, tx_order)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ----------------------------------------------------------------------------
--- 2. The Merkle Roots Checkpoint Table
--- This table stores the cryptographic checkpoints of your data tables.
--- It is used by `merkle_service.py`.
+-- 2. Merkle Root Checkpoints
 -- ----------------------------------------------------------------------------
-CREATE TABLE ledger_roots (
+CREATE TABLE IF NOT EXISTS ledger_roots (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    table_name VARCHAR(255) NOT NULL,
+    table_name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
     root_hash VARCHAR(64) NOT NULL,
     computed_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6),
-    reference_root VARCHAR(64),
-    reference_table VARCHAR(255),
-    signer VARCHAR(255),
+    signer VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
     signature TEXT,
     pubkey_fingerprint VARCHAR(64),
-    INDEX (table_name, computed_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
+    INDEX idx_roots_lookup (table_name, computed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ----------------------------------------------------------------------------
--- 3. An Example "Live" Table (`customers`)
--- This is a standard table for your application's data.
--- Triggers on this table will automatically write audit events to the `ledger`.
+-- 3. Live Data Table: customers (explicit collation on text columns)
 -- ----------------------------------------------------------------------------
-CREATE TABLE customers (
+CREATE TABLE IF NOT EXISTS customers (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
+    email VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci UNIQUE NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- ----------------------------------------------------------------------------
--- 4. Triggers to Populate the Universal Ledger
+-- 4. Trigger Utility: Safe Chain Append
 -- ----------------------------------------------------------------------------
-
+DROP PROCEDURE IF EXISTS append_ledger_entry;
 DELIMITER $$
-CREATE TRIGGER customers_after_insert AFTER INSERT ON customers FOR EACH ROW
+
+CREATE PROCEDURE append_ledger_entry (
+    IN p_table_name VARCHAR(255),
+    IN p_record_id VARCHAR(255),
+    IN p_op_type VARCHAR(10),
+    IN p_old_payload JSON,
+    IN p_new_payload JSON
+)
 BEGIN
-    -- The payload should contain only the data, not the primary key itself.
-    -- The `NEW` object contains the final state of the row after the INSERT.
-    INSERT INTO ledger (tx_id, table_name, record_id, op_type, new_payload)
-    VALUES (UUID(), 'customers', NEW.id, 'INSERT', JSON_OBJECT('name', NEW.name, 'email', NEW.email, 'created_at', NEW.created_at, 'updated_at', NEW.updated_at));
+    DECLARE v_prev_hash CHAR(64);
+    DECLARE v_chain_hash CHAR(64);
+    DECLARE v_tx_id VARCHAR(36);
+    DECLARE v_created_at TIMESTAMP(6);
+
+    -- Lock the last row for this table to prevent concurrent reads/writes.
+    -- This serializes ledger inserts for a given table, ensuring chain integrity.
+    SELECT chain_hash INTO v_prev_hash
+    FROM ledger
+    WHERE table_name = p_table_name
+    ORDER BY tx_order DESC
+    LIMIT 1
+    FOR UPDATE;
+
+    -- Use a conventional 'genesis' hash for the first entry.
+    SET v_prev_hash = COALESCE(v_prev_hash, '0000000000000000000000000000000000000000000000000000000000000000');
+
+    -- Generate UUID and timestamp ONCE and store in variables.
+    SET v_tx_id = UUID();
+    SET v_created_at = NOW(6);
+
+    -- Compute the chain_hash for the new row. This must be perfectly reproducible.
+    -- Use COALESCE with literal 'NULL' to distinguish from empty strings.
+    SET v_chain_hash = SHA2(CONCAT_WS('|',
+        v_prev_hash,
+        v_tx_id,
+        p_record_id,
+        p_op_type,
+        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(p_old_payload, '$')), 'NULL'),
+        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(p_new_payload, '$')), 'NULL'),
+        DATE_FORMAT(v_created_at, '%Y-%m-%d %H:%i:%s.%f')
+    ), 256);
+
+    -- Use the variables to ensure the inserted data matches what was hashed.
+    INSERT INTO ledger (tx_id, table_name, record_id, op_type, old_payload, new_payload, created_at, prev_hash, chain_hash)
+    VALUES (v_tx_id, p_table_name, p_record_id, p_op_type, p_old_payload, p_new_payload, v_created_at, v_prev_hash, v_chain_hash);
 END$$
 
-CREATE TRIGGER customers_after_update AFTER UPDATE ON customers FOR EACH ROW
+-- ----------------------------------------------------------------------------
+-- 5. Triggers to Record Events (force-collation on string values)
+-- ----------------------------------------------------------------------------
+
+DROP TRIGGER IF EXISTS customers_after_insert$$
+CREATE TRIGGER customers_after_insert
+AFTER INSERT ON customers
+FOR EACH ROW
 BEGIN
-    -- The `OLD` object has the state before the update, `NEW` has the state after. This is correct.
-    INSERT INTO ledger (tx_id, table_name, record_id, op_type, old_payload, new_payload)
-    VALUES (UUID(), 'customers', NEW.id, 'UPDATE', JSON_OBJECT('name', OLD.name, 'email', OLD.email, 'created_at', OLD.created_at, 'updated_at', OLD.updated_at), JSON_OBJECT('name', NEW.name, 'email', NEW.email, 'created_at', NEW.created_at, 'updated_at', NEW.updated_at));
+    CALL append_ledger_entry(
+        'customers',
+        CAST(NEW.id AS CHAR),
+        'INSERT',
+        NULL,
+        JSON_OBJECT(
+            'name', CONVERT(NEW.name USING utf8mb4) COLLATE utf8mb4_general_ci,
+            'email', CONVERT(NEW.email USING utf8mb4) COLLATE utf8mb4_general_ci
+        )
+    );
 END$$
 
-CREATE TRIGGER customers_after_delete AFTER DELETE ON customers FOR EACH ROW
+DROP TRIGGER IF EXISTS customers_after_update$$
+CREATE TRIGGER customers_after_update
+AFTER UPDATE ON customers
+FOR EACH ROW
 BEGIN
-    INSERT INTO ledger (tx_id, table_name, record_id, op_type, old_payload)
-    -- The `OLD` object correctly represents the state of the row just before it was deleted.
-    VALUES (UUID(), 'customers', OLD.id, 'DELETE', JSON_OBJECT('name', OLD.name, 'email', OLD.email, 'created_at', OLD.created_at, 'updated_at', OLD.updated_at));
+    CALL append_ledger_entry(
+        'customers',
+        CAST(NEW.id AS CHAR),
+        'UPDATE',
+        JSON_OBJECT(
+            'name', CONVERT(OLD.name USING utf8mb4) COLLATE utf8mb4_general_ci,
+            'email', CONVERT(OLD.email USING utf8mb4) COLLATE utf8mb4_general_ci
+        ),
+        JSON_OBJECT(
+            'name', CONVERT(NEW.name USING utf8mb4) COLLATE utf8mb4_general_ci,
+            'email', CONVERT(NEW.email USING utf8mb4) COLLATE utf8mb4_general_ci
+        )
+    );
 END$$
+
+DROP TRIGGER IF EXISTS customers_after_delete$$
+CREATE TRIGGER customers_after_delete
+AFTER DELETE ON customers
+FOR EACH ROW
+BEGIN
+    CALL append_ledger_entry(
+        'customers',
+        CAST(OLD.id AS CHAR),
+        'DELETE',
+        JSON_OBJECT(
+            'name', CONVERT(OLD.name USING utf8mb4) COLLATE utf8mb4_general_ci,
+            'email', CONVERT(OLD.email USING utf8mb4) COLLATE utf8mb4_general_ci
+        ),
+        NULL
+    );
+END$$
+
 DELIMITER ;

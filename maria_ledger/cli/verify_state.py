@@ -15,7 +15,8 @@ from maria_ledger.cli.reconstruct import (
     reconstruct_table_state,
     build_merkle_root_from_state,
     compute_row_hash, _parse_payload,
-    db_stream_query
+    db_stream_query,
+    parse_filters
 )
 
 console = Console()
@@ -30,20 +31,9 @@ def load_current_state_stream(conn, table_name, filters: Optional[List[str]] = N
     # This needs to be adapted if the schema is different.
     sql = f"SELECT * FROM {table_name}"
     params = []
-
-    if filters:
-        filter_clauses = []
-        for f in filters:
-            if ":" not in f:
-                raise ValueError(f"Invalid filter format: '{f}'. Expected 'key:value'.")
-            key, value = f.split(":", 1)
-            # Basic validation to prevent injection on column names
-            if not key.replace("_", "").isalnum():
-                raise ValueError(f"Invalid filter key: {key}")
-            filter_clauses.append(f"{key} = %s")
-            params.append(value)
-        sql += " WHERE " + " AND ".join(filter_clauses)
-
+    filter_sql, filter_params = parse_filters(filters)
+    sql += " WHERE 1=1" + filter_sql # Start with WHERE 1=1 to simplify appending
+    params.extend(filter_params)
     sql += " ORDER BY id"
 
     # Use a dictionary cursor and unbuffered to stream results
@@ -57,19 +47,19 @@ def load_current_state_stream(conn, table_name, filters: Optional[List[str]] = N
             yield record_id, _parse_payload(payload)
 
 
-def get_merkle_root_of_current_state(conn, table_name, filters: Optional[List[str]] = None):
+def get_merkle_root_of_current_state(conn, table_name, filters: Optional[List[str]] = None, fields_to_hash: Optional[List[str]] = None):
     """
     Computes the Merkle root of the current state of a given table.
     """
     # Stream hashes directly into the Merkle tree builder to save memory.
     hashes = [
-        compute_row_hash(record_id, payload)
+        compute_row_hash(record_id, payload, fields_to_hash=fields_to_hash)
         for record_id, payload in load_current_state_stream(conn, table_name, filters)
     ]
     return MerkleTree(hashes).get_root()
 
 
-def find_discrepancies(reconstructed_state: dict, live_state_stream):
+def find_discrepancies(reconstructed_state: dict, live_state_stream, fields_to_hash: Optional[List[str]] = None):
     """
     Compares reconstructed state with live state to find discrepancies using a
     memory-efficient streaming approach.
@@ -109,8 +99,8 @@ def find_discrepancies(reconstructed_state: dict, live_state_stream):
 
         # Case 3: IDs match. Now we compare the content.
         elif recon_id_int == live_id_int:
-            recon_hash = compute_row_hash(recon_id, recon_payload)
-            live_hash = compute_row_hash(live_id, live_payload)
+            recon_hash = compute_row_hash(recon_id, recon_payload, fields_to_hash=fields_to_hash)
+            live_hash = compute_row_hash(live_id, live_payload, fields_to_hash=fields_to_hash)
             if recon_hash != live_hash:
                 issues.append(f"HASH MISMATCH for ID {live_id}")
             
@@ -131,26 +121,31 @@ def verify_state_command(
     console.print(f"Verifying state of table [bold cyan]{table_name}[/]...")
     conn = get_connection()
 
+    # Define the fields that are critical for integrity verification.
+    # Timestamps like 'created_at' and 'updated_at' are intentionally excluded.
+    fields_to_hash = ['name', 'email']
+    console.print(f"Verifying against critical fields: [bold yellow]id, {', '.join(fields_to_hash)}[/bold yellow]")
+
     try:
         # 1. Reconstruct state from the ledger
         console.print("Reconstructing state from ledger...")
-        reconstructed_state, reconstructed_root = reconstruct_table_state(conn, table_name, filters=filters)
+        reconstructed_state, reconstructed_root = reconstruct_table_state(conn, table_name, filters=filters, fields_to_hash=fields_to_hash)
         console.print(f"  [green]✓[/green] Reconstructed Merkle root: [bold]{reconstructed_root}[/]")
 
         # 2. Compute Merkle root from the live table
         console.print(f"Computing Merkle root from live table '{table_name}'...")
-        live_root = get_merkle_root_of_current_state(conn, table_name, filters=filters)
+        live_root = get_merkle_root_of_current_state(conn, table_name, filters=filters, fields_to_hash=fields_to_hash)
         console.print(f"  [green]✓[/green] Live table Merkle root: [bold]{live_root}[/]")
 
         # 3. Compare roots
         if reconstructed_root == live_root:
-            console.print("\n[bold green]✅ SUCCESS: Live table state matches the ledger.[/bold green]")
+            console.print("\n[bold green]✅ SUCCESS: Live table state matches the ledger based on critical fields.[/bold green]")
         else:
             console.print("\n[bold red]❌ FAILURE: State mismatch detected![/bold red]")
             console.print("Finding discrepancies...")
             live_stream = load_current_state_stream(conn, table_name, filters=filters)
             try:
-                discrepancies = find_discrepancies(reconstructed_state, live_stream)
+                discrepancies = find_discrepancies(reconstructed_state, live_stream, fields_to_hash=fields_to_hash)
                 for issue in discrepancies:
                     console.print(f"  - [yellow]{issue}[/yellow]")
                 raise typer.Exit(code=1)
