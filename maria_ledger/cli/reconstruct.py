@@ -16,37 +16,20 @@ Functions:
 
 import typer
 import json
-import hashlib
 import csv
 from rich.console import Console
 from typing import List, Optional
 from datetime import datetime
 
 from maria_ledger.crypto.merkle_tree import MerkleTree
-from maria_ledger.utils.helpers import canonicalize_json, parse_filters
+from maria_ledger.crypto.hash_utils import compute_record_hash,canonicalize_json
+from maria_ledger.utils.helpers import parse_filters
+from maria_ledger.db.connection import get_connection
 
 
 # ============================================================
 # === Canonicalization & Hashing Utilities ===================
 # ============================================================
-
-
-def compute_row_hash(record_id, payload_json, fields_to_hash: Optional[List[str]] = None):
-    """
-    Compute SHA-256 hash for a given record.
-    Hashes record_id and a subset of payload fields if specified.
-    """
-    if fields_to_hash:
-        # Filter the payload to include only the specified fields, sorted for determinism.
-        # Using .get(k) ensures that if a field is missing, it's treated as None, which is consistent.
-        filtered_payload = {k: payload_json.get(k) for k in sorted(fields_to_hash)}
-        payload_to_hash = filtered_payload
-    else:
-        # Hash the entire payload if no specific fields are given (maintains old behavior).
-        payload_to_hash = payload_json
-
-    data = f"{record_id}|{canonicalize_json(payload_to_hash).decode('utf-8')}"
-    return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
 
 # ============================================================
@@ -153,7 +136,7 @@ def build_merkle_root_from_state(state_dict, fields_to_hash: Optional[List[str]]
     hashes = []
     for record_id in sorted(state_dict.keys()):
         payload = state_dict[record_id]
-        row_hash = compute_row_hash(record_id, payload, fields_to_hash=fields_to_hash)
+        row_hash = compute_record_hash(record_id, payload, fields_to_hash=fields_to_hash)
         hashes.append(row_hash)
 
     # Use the centralized MerkleTree class
@@ -192,7 +175,6 @@ def reconstruct_table_state(conn, table_name, out_csv=None, filters: Optional[Li
     ledger_stream = load_ledger_stream(conn, table_name, filters)
     state = apply_ops_to_state(ledger_stream)
     merkle_root = build_merkle_root_from_state(state, fields_to_hash=fields_to_hash)
-
     if out_csv:
         write_state_to_csv(state, out_csv)
 
@@ -213,7 +195,6 @@ def reconstruct_command(
     """
     Reconstruct a table's state from the ledger and print its Merkle root.
     """
-    from maria_ledger.db.connection import get_connection
     conn = get_connection()
 
     try:

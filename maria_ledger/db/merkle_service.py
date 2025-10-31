@@ -59,13 +59,12 @@ def compute_root_from_chain_hashes(conn, table_name: str) -> Optional[str]:
     finally:
         cursor.close()
 
-def compute_and_store_merkle_root(table_name: str, reference_table: str = None) -> str:
+def compute_and_store_merkle_root(table_name: str) -> str:
     """
     Compute and store a new Merkle root for the given table.
     
     Args:
         table_name: Name of the table to compute root for
-        reference_table: Optional name of another ledger table to cross-reference
     
     Returns:
         The computed Merkle root hash
@@ -92,32 +91,21 @@ def compute_and_store_merkle_root(table_name: str, reference_table: str = None) 
     pub_path = cfg["crypto"]["public_key_path"]
     pub_fingerprint = public_key_fingerprint_from_file(pub_path)
 
-    # Get reference root if specified
-    reference_root = None
-    if reference_table:
-        ref_root = get_latest_merkle_root(reference_table)
-        if ref_root:
-            reference_root = ref_root[0]
-
-    # Store in ledger_roots with signature and optional reference
+    # Store in ledger_roots with signature
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
             """
             INSERT INTO ledger_roots(
-                table_name, root_hash, reference_root, reference_table,
-                signer, signature, pubkey_fingerprint
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                table_name, root_hash, signer, signature, pubkey_fingerprint
+            ) VALUES (%s, %s, %s, %s, %s)
             """,
-            (table_name, root, reference_root, reference_table,
-             signer_id, signature_b64, pub_fingerprint)
+            (table_name, root, signer_id, signature_b64, pub_fingerprint)
         )
         conn.commit()
         
         print(f"[✓] Merkle root stored and signed: {root} (signer={signer_id})")
-        if reference_table and reference_root:
-            print(f"[✓] Cross-referenced with {reference_table}")
         return root
         
     finally:

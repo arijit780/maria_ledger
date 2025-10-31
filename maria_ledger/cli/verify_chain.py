@@ -3,50 +3,15 @@ verify_chain.py
 
 CLI command to verify the integrity of the ledger's internal hash chain.
 """
-import hashlib
-from datetime import datetime
-import json
-
 import typer
 from rich.console import Console
 from rich.progress import Progress
 
 from maria_ledger.db.connection import get_connection
 
-from maria_ledger.utils.helpers import canonicalize_json
+from maria_ledger.crypto.hash_utils import compute_chain_hash
 
 console = Console()
-
-
-def canonical_string(val):
-    """Converts values to a canonical string format for hashing, matching the trigger logic."""
-    if val is None:
-        return 'NULL'
-    if isinstance(val, (dict, list)):
-        return canonicalize_json(val).decode('utf-8')
-    if isinstance(val, datetime):
-        return val.strftime('%Y-%m-%d %H:%M:%S.%f') # Matches trigger's DATE_FORMAT
-    return str(val)
-
-
-def compute_chain_hash_py(row: dict) -> str:
-    """
-    Computes the chain_hash in Python, mirroring the logic in the SQL trigger.
-    This is used for verification.
-    """
-    # Ensure the order and format matches the CONCAT_WS in the trigger
-    # The trigger hashes the raw JSON string from the payload columns.
-    # We must do the same here, treating them as plain strings.
-    data_to_hash = '|'.join([
-        canonical_string(row['prev_hash']),
-        canonical_string(row['tx_id']),
-        canonical_string(row['record_id']),
-        canonical_string(row['op_type']),
-        canonical_string(row['old_payload']),
-        canonical_string(row['new_payload']),
-        canonical_string(row['created_at'])
-    ])
-    return hashlib.sha256(data_to_hash.encode('utf-8')).hexdigest()
 
 
 def verify_chain_command(
@@ -84,7 +49,16 @@ def verify_chain_command(
                         raise typer.Exit(code=1)
 
                     # 2. Verify the integrity of the current row's hash
-                    recomputed_hash = compute_chain_hash_py(row)
+                    recomputed_hash = compute_chain_hash(
+                        row['prev_hash'],
+                        row['tx_id'],
+                        row['record_id'],
+                        row['op_type'],
+                        row['old_payload'],
+                        row['new_payload'],
+                        row['created_at'],
+                        
+                    )
                     if row['chain_hash'] != recomputed_hash:
                         console.print(f"\n[bold red]❌ FAILURE: Corrupted entry![/bold red]")
                         console.print(f"Hash mismatch for row at tx_order [bold]{row['tx_order']}[/]:")

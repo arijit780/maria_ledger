@@ -15,6 +15,8 @@ console = Console()
 
 
 def format_payload_diff(op_type: str, old_payload: dict, new_payload: dict) -> str:
+    print("new_payload",new_payload)
+    print("old_payload",old_payload)
     """Creates a human-readable summary of what changed in a transaction."""
     if op_type == 'INSERT':
         return ", ".join(f"[green]{k}[/green]=[yellow]{v}[/yellow]" for k, v in (new_payload or {}).items())

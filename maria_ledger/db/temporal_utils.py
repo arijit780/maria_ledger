@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Tuple
 import json
 import hashlib
 from maria_ledger.db.connection import get_connection
+from maria_ledger.crypto.hash_utils import canonicalize_json,compute_chain_hash
 
 def iso(ts):
     if isinstance(ts, datetime):
@@ -211,21 +212,21 @@ def analyze_universal_ledger_chain(table_name: str) -> Dict[str, Any]:
                 seen_tx_ids.add(tx_id)
 
                 # 4. Hash chain verification
-                current_row_hash = hashlib.sha256(
-                    (
-                        str(row.get('old_payload', 'n/a')) +
-                        str(row.get('new_payload', 'n/a')) +
-                        str(row.get('op_type', 'n/a')) +
-                        str(row.get('record_id', 'n/a')) +
-                        str(iso(row.get('created_at', 'n/a')))
-                    ).encode('utf-8')
-                ).hexdigest()
+                current_row_hash = compute_chain_hash(
+                    prev_hash = row.get('prev_hash', '0' * 64),
+                    tx_id = row.get('tx_id',''),
+                    record_id = row.get('record_id',''),
+                    op_type = row.get('op_type',''),
+                    old_payload = row.get('old_payload',''),
+                    new_payload = row.get('new_payload',''),
+                    created_at = row.get('created_at',datetime.now())
+                )
 
-                if i > 0 and prev_row_hash != tx_id:
+                if i > 0 and prev_row_hash != current_row_hash:
                      anomalies.append({
                         "type": "hash_chain_mismatch",
                         "index": index,
-                        "detail": f"Hash chain broken at tx_order {tx_order}. Expected {prev_row_hash} but got {tx_id}."
+                        "detail": f"Hash chain broken at tx_order {tx_order}. Expected {prev_row_hash} but got {current_row_hash}."
                     })
 
                 prev_tx_order = tx_order

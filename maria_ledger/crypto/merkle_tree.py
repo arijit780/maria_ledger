@@ -1,9 +1,6 @@
-import hashlib
 import math
 from typing import Optional
-
-def sha256(data: str) -> str:
-    return hashlib.sha256(data.encode('utf-8')).hexdigest()
+from .hash_utils import compute_merkle_hash
 
 class MerkleTree:
     def __init__(self, leaves: list[str]):
@@ -21,7 +18,7 @@ class MerkleTree:
             for i in range(0, len(current_level), 2):
                 left = current_level[i]
                 right = current_level[i+1] if i+1 < len(current_level) else left
-                combined = sha256(left + right)
+                combined = compute_merkle_hash(left, right)
                 next_level.append(combined)
             current_level = next_level
             self.levels.append(current_level)
@@ -50,9 +47,9 @@ class MerkleTree:
         idx = index
         for sibling_hash in proof:
             if idx % 2 == 0:
-                computed = sha256(computed + sibling_hash)
+                computed = compute_merkle_hash(computed, sibling_hash)
             else:
-                computed = sha256(sibling_hash + computed)
+                computed = compute_merkle_hash(sibling_hash, computed)
             idx = idx // 2
         return computed == root
 

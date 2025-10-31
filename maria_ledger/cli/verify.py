@@ -19,11 +19,11 @@ from maria_ledger.utils.config import get_config
 from maria_ledger.cli.reconstruct import (
     reconstruct_table_state,
     build_merkle_root_from_state,
-    compute_row_hash,
     _parse_payload,
     db_stream_query,
     parse_filters,
 )
+from maria_ledger.crypto.hash_utils import compute_record_hash
 
 console = Console()
 
@@ -53,14 +53,21 @@ def load_current_state_stream(conn, table_name, filters: Optional[List[str]] = N
             yield record_id, _parse_payload(payload)
 
 
+# ============================================================
+# === Compute Merkle Root for Live Table =====================
+# ============================================================
+
 def get_merkle_root_of_current_state(
-    conn, table_name, filters: Optional[List[str]] = None, fields_to_hash: Optional[List[str]] = None
+    conn,
+    table_name,
+    filters: Optional[List[str]] = None,
+    fields_to_hash: Optional[List[str]] = None,
 ):
     """Computes the Merkle root of the current state of a given table."""
     from maria_ledger.crypto.merkle_tree import MerkleTree
 
     hashes = [
-        compute_row_hash(record_id, payload, fields_to_hash=fields_to_hash)
+        compute_record_hash(record_id, payload, fields_to_hash=fields_to_hash)
         for record_id, payload in load_current_state_stream(conn, table_name, filters)
     ]
     return MerkleTree(hashes).get_root()
@@ -70,7 +77,9 @@ def get_merkle_root_of_current_state(
 # === Compare Ledger vs Live State ===========================
 # ============================================================
 
-def find_discrepancies(reconstructed_state: dict, live_state_stream, fields_to_hash: Optional[List[str]] = None):
+def find_discrepancies(
+    reconstructed_state: dict, live_state_stream, fields_to_hash: Optional[List[str]] = None
+):
     """Compares reconstructed state with live state to find discrepancies."""
     issues = []
 
@@ -99,8 +108,8 @@ def find_discrepancies(reconstructed_state: dict, live_state_stream, fields_to_h
             live_id, live_payload = get_next(live_iter)
 
         elif recon_id_int == live_id_int:
-            recon_hash = compute_row_hash(recon_id, recon_payload, fields_to_hash=fields_to_hash)
-            live_hash = compute_row_hash(live_id, live_payload, fields_to_hash=fields_to_hash)
+            recon_hash = compute_record_hash(recon_id, recon_payload, fields_to_hash=fields_to_hash)
+            live_hash = compute_record_hash(live_id, live_payload, fields_to_hash=fields_to_hash)
 
             if recon_hash != live_hash:
                 issues.append(f"HASH MISMATCH for ID {live_id}")
@@ -204,12 +213,14 @@ def verify_table_command(
             reconstructed_state, reconstructed_root = reconstruct_table_state(
                 conn, table_name, filters=filters, fields_to_hash=fields_to_hash
             )
-            console.print(f" [green]✓[/green] Reconstructed Merkle root: [bold]{reconstructed_root}[/]")
+            console.print(f" [green]✓[/green] Reconstructed Merkle root: [bold]{reconstructed_root}[/bold]")
 
             # Compute Merkle root from live table
             console.print(f"Computing Merkle root from live table '{table_name}'...")
-            live_root = get_merkle_root_of_current_state(conn, table_name, filters=filters, fields_to_hash=fields_to_hash)
-            console.print(f" [green]✓[/green] Live table Merkle root: [bold]{live_root}[/]")
+            live_root = get_merkle_root_of_current_state(
+                conn, table_name, filters=filters, fields_to_hash=fields_to_hash
+            )
+            console.print(f" [green]✓[/green] Live table Merkle root: [bold]{live_root}[/bold]")
 
             # Compare roots
             if reconstructed_root == live_root:
@@ -220,7 +231,9 @@ def verify_table_command(
 
                 live_stream = load_current_state_stream(conn, table_name, filters=filters)
                 try:
-                    discrepancies = find_discrepancies(reconstructed_state, live_stream, fields_to_hash=fields_to_hash)
+                    discrepancies = find_discrepancies(
+                        reconstructed_state, live_stream, fields_to_hash=fields_to_hash
+                    )
                     for issue in discrepancies:
                         console.print(f" - [yellow]{issue}[/yellow]")
                     raise typer.Exit(code=1)
