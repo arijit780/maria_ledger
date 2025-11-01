@@ -1,5 +1,6 @@
 mysql-connector-python
 PyYAML
-click
-rich
+typer[all]
 pytest
+# For installing the project in editable mode for development:
+# pip install -e .

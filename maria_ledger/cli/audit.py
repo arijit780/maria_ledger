@@ -50,19 +50,19 @@ def run(interval_hours: int = typer.Option(24, "--interval", help="Hours between
         ok = (computed_root == stored_root)
 
         if ok:
-            logger.info(f"[✓] {table} integrity verified.")
+            logger.info(f"[{table}] integrity verified.")
         else:
-            logger.error(f"[✗] Tamper detected in {table}!")
+            logger.error(f"[FAILED] Tamper detected in {table}!")
             issues.append(table)
 
     cursor.close()
     conn.close()
 
     if issues:
-        msg = f"Integrity issues detected in: {', '.join(issues)}"
+        msg = f"Alert: Integrity issues detected in: {', '.join(issues)}"
         send_alert("MariaLedger Integrity Alert", msg)
-        typer.echo(f"[!] {msg}")
+        typer.echo(msg)
     else:
-        typer.echo("[✓] All ledger tables verified successfully.")
+        typer.echo("All ledger tables verified successfully.")
 
     logger.info(f"Audit completed at {pretty_time(datetime.datetime.utcnow())}")

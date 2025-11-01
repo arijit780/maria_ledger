@@ -102,7 +102,7 @@ def snapshot_command(
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(manifest, f, sort_keys=True, separators=(",", ":"), indent=4)
 
-        console.print(f"\n[green]✅ Snapshot created successfully at:[/] [yellow]{out_file}[/yellow]")
+        console.print(f"\n[green]Snapshot created successfully at:[/] [yellow]{out_file}[/yellow]")
 
         # ------------------------------------------------------------
         # Step 6: Optional — store in ledger_roots
@@ -113,16 +113,16 @@ def snapshot_command(
 
             stored_root = compute_and_store_merkle_root(table_name)
             if stored_root:
-                console.print("  - [green]✓[/green] Root stored in database.")
+                console.print("  - Root stored in database.")
             else:
-                console.print("  - [red]❌[/red] Failed to store root in database.")
+                console.print("  - [red]Failed to store root in database.[/red]")
 
     except FileNotFoundError:
-        console.print(f"[bold red]❌ ERROR:[/bold red] Private key not found at '{priv_key_path}'. Check your config.toml.")
+        console.print(f"[bold red]ERROR:[/bold red] Private key not found at '{priv_key_path}'. Check your config.toml.")
         raise typer.Exit(code=1)
 
     except Exception as e:
-        console.print(f"[bold red]❌ An unexpected error occurred:[/bold red] {e}")
+        console.print(f"[bold red]An unexpected error occurred:[/bold red] {e}")
         raise typer.Exit(code=1)
 
     finally:

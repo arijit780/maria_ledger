@@ -26,7 +26,7 @@ def trustmap_command(
         if not record_cross_reference(ledger_a, ledger_b):
             typer.echo("Failed to record cross-reference", err=True)
             raise typer.Exit(1)
-        typer.echo(f"✓ Recorded cross-reference between {ledger_a} and {ledger_b}")
+        typer.echo(f"Recorded cross-reference between {ledger_a} and {ledger_b}")
 
     if verify:
         results = verify_cross_reference(ledger_a, ledger_b)
@@ -48,7 +48,7 @@ def trustmap_command(
         # Overall status
         table.add_row(
             "Cross-Reference Valid",
-            "✓ Valid" if results["cross_refs_valid"] else "✗ Invalid"
+            "Valid" if results["cross_refs_valid"] else "Invalid"
         )
         
         # Current roots

@@ -42,7 +42,7 @@ def verify_chain_command(
                 for row in cur:
                     # 1. Verify the link to the previous entry
                     if row['prev_hash'] != expected_prev_hash:
-                        console.print(f"\n[bold red]❌ FAILURE: Chain broken![/bold red]")
+                        console.print(f"\n[bold red]FAILURE: Chain broken![/bold red]")
                         console.print(f"Mismatch at tx_order [bold]{row['tx_order']}[/]:")
                         console.print(f"  - Expected prev_hash: {expected_prev_hash}")
                         console.print(f"  - Found prev_hash:    {row['prev_hash']}")
@@ -60,7 +60,7 @@ def verify_chain_command(
                         
                     )
                     if row['chain_hash'] != recomputed_hash:
-                        console.print(f"\n[bold red]❌ FAILURE: Corrupted entry![/bold red]")
+                        console.print(f"\n[bold red]FAILURE: Corrupted entry![/bold red]")
                         console.print(f"Hash mismatch for row at tx_order [bold]{row['tx_order']}[/]:")
                         console.print(f"  - Stored chain_hash:   {row['chain_hash']}")
                         console.print(f"  - Recomputed chain_hash: {recomputed_hash}")
@@ -69,7 +69,7 @@ def verify_chain_command(
                     expected_prev_hash = row['chain_hash']
                     progress.update(task, advance=1)
 
-        console.print("\n[bold green]✅ SUCCESS: Ledger hash chain is intact and valid.[/bold green]")
+        console.print("\n[bold green]SUCCESS: Ledger hash chain is intact and valid.[/bold green]")
 
     finally:
         conn.close()

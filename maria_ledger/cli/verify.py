@@ -5,8 +5,10 @@ Unified CLI command to verify table integrity with multiple verification modes.
 """
 
 import typer
+import json
 from rich.console import Console
-from typing import List, Optional
+from typing import List, Optional, Dict, Any, Tuple
+from datetime import datetime
 
 from maria_ledger.db.connection import get_connection
 from maria_ledger.db.merkle_service import (
@@ -24,6 +26,7 @@ from maria_ledger.cli.reconstruct import (
     parse_filters,
 )
 from maria_ledger.crypto.hash_utils import compute_record_hash
+from maria_ledger.crypto.merkle_tree import MerkleTree
 
 console = Console()
 
@@ -78,7 +81,9 @@ def get_merkle_root_of_current_state(
 # ============================================================
 
 def find_discrepancies(
-    reconstructed_state: dict, live_state_stream, fields_to_hash: Optional[List[str]] = None
+    reconstructed_state: dict,
+    live_state_stream,
+    fields_to_hash: Optional[List[str]] = None,
 ):
     """Compares reconstructed state with live state to find discrepancies."""
     issues = []
@@ -121,6 +126,111 @@ def find_discrepancies(
 
 
 # ============================================================
+# === Row-Level Verification & Proof Generation ==============
+# ============================================================
+
+def verify_row(
+    conn,
+    table_name: str,
+    record_id: str,
+    fields_to_hash: Optional[List[str]] = None,
+    check_checkpoint: bool = True,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Verify a single row by checking:
+      1. If stored checkpoint matches current ledger (checkpoint verification)
+      2. If live row matches reconstructed state (state verification)
+    """
+    # Step 1: Check if ledger matches stored checkpoint
+    if check_checkpoint:
+        stored_root_data = get_latest_merkle_root(table_name)
+        if stored_root_data:
+            stored_root, computed_at = stored_root_data
+            computed_chain_root = compute_root_from_chain_hashes(conn, table_name)
+            if computed_chain_root and stored_root != computed_chain_root:
+                return (
+                    False,
+                    f"Ledger changed since last checkpoint ({computed_at}). "
+                    f"Use '--force' to update checkpoint.",
+                )
+
+    # Step 2: Verify row state matches reconstructed state
+    reconstructed_state, _ = reconstruct_table_state(
+        conn, table_name, filters=None, fields_to_hash=fields_to_hash
+    )
+    if record_id not in reconstructed_state:
+        return False, f"Record ID {record_id} not found in reconstructed state."
+
+    # Get live row data
+    live_rows = list(load_current_state_stream(conn, table_name, filters=[f"id:{record_id}"]))
+    if not live_rows:
+        return False, f"Record ID {record_id} not found in live table."
+
+    live_id, live_payload = live_rows[0]
+    recon_hash = compute_record_hash(record_id, reconstructed_state[record_id], fields_to_hash=fields_to_hash)
+    live_hash = compute_record_hash(live_id, live_payload, fields_to_hash=fields_to_hash)
+
+    if recon_hash != live_hash:
+        return False, "Hash mismatch: Live row doesn't match reconstructed state."
+    return True, None
+
+
+def generate_record_proof(
+    conn,
+    table_name: str,
+    record_id: str,
+    fields_to_hash: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Generate cryptographic proof for a single record."""
+    reconstructed_state, _ = reconstruct_table_state(
+        conn, table_name, filters=None, fields_to_hash=fields_to_hash
+    )
+    if record_id not in reconstructed_state:
+        raise ValueError(f"Record {record_id} not found in reconstructed state.")
+
+    # Build Merkle tree
+    sorted_ids = sorted(reconstructed_state.keys(), key=lambda x: int(x) if x.isdigit() else x)
+    record_index = sorted_ids.index(record_id)
+    hashes = [
+        compute_record_hash(rid, reconstructed_state[rid], fields_to_hash=fields_to_hash)
+        for rid in sorted_ids
+    ]
+    tree = MerkleTree(hashes)
+    proof_path = tree.get_proof(record_index)
+    leaf_hash = hashes[record_index]
+    computed_state_root = tree.get_root()
+
+    # Get stored root for reference
+    stored_root_data = get_latest_merkle_root(table_name)
+    stored_chain_root = stored_root_data[0] if stored_root_data else None
+
+    return {
+        "proof_type": "record_state_proof",
+        "table_name": table_name,
+        "record_id": record_id,
+        "record_data": reconstructed_state[record_id],
+        "verification": {
+            "state_root": computed_state_root,
+            "ledger_chain_root": stored_chain_root,
+            "timestamp": datetime.now().isoformat(),
+            "fields_hashed": fields_to_hash or "all",
+        },
+        "merkle_proof": {
+            "leaf_hash": leaf_hash,
+            "proof_path": proof_path,
+            "leaf_index": record_index,
+            "instructions": "Use leaf_hash + proof_path to reconstruct state_root",
+        },
+        "trusted_checkpoint": stored_chain_root,
+        "how_to_verify": (
+            "1. Compute record hash from record_data. "
+            "2. Use proof_path to rebuild state_root. "
+            "3. Compare with trusted_checkpoint if available."
+        ),
+    }
+
+
+# ============================================================
 # === Main Verification Command ==============================
 # ============================================================
 
@@ -132,18 +242,17 @@ def verify_table_command(
         False, "--comprehensive", help="Perform both stored root verification and live state verification."
     ),
     filters: Optional[List[str]] = typer.Option(None, "--filter", help="Filter by 'key:value'. Can be used multiple times."),
+    export: Optional[str] = typer.Option(None, "--export", help="Export proof to JSON file (requires exactly one matching row)."),
 ):
     """
     Unified verification command with multiple modes:
 
-    Default:
-        Verify stored Merkle root against computed root from ledger.
-    --live:
-        Verify live table state against reconstructed state from ledger.
-    --comprehensive:
-        Perform both verification modes.
-    --force:
-        Force re-computation and storage of a new Merkle root.
+      • Default (no filters): Verify stored Merkle root against computed root from ledger.
+      • With --filter: Row-level verification.
+      • With --export: Export Merkle proof for a specific row.
+      • --live: Compare reconstructed state vs live table.
+      • --comprehensive: Perform both stored and live verification.
+      • --force: Recompute and store new Merkle root checkpoint.
     """
     if force:
         console.print(f"Forcing re-computation and storage of new Merkle root for [bold cyan]{table_name}[/]...")
@@ -154,7 +263,67 @@ def verify_table_command(
             console.print(f"[yellow]No data found for {table_name}, no root stored.[/yellow]")
         return
 
-    # Determine verification modes
+    conn = get_connection()
+    cfg = get_config()
+
+    # ------------------------------------------------------------
+    # Row-level verification mode
+    # ------------------------------------------------------------
+    if filters:
+        fields_to_hash = ["name", "email"]  # Critical fields
+        try:
+            matching_rows = list(load_current_state_stream(conn, table_name, filters=filters))
+            if not matching_rows:
+                console.print(f"[red]❌ No rows found matching filter: {filters}[/red]")
+                return
+
+            # --- Export proof ---
+            if export:
+                if len(matching_rows) != 1:
+                    console.print(
+                        f"[red]❌ Filter matches {len(matching_rows)} rows. Proof export requires exactly one row.[/red]"
+                    )
+                    for record_id, payload in matching_rows:
+                        console.print(f" - ID {record_id}: {payload}")
+                    raise typer.Exit(code=1)
+
+                record_id, payload = matching_rows[0]
+                console.print(f"Verifying row ID [bold cyan]{record_id}[/bold cyan]...")
+                is_valid, error_msg = verify_row(conn, table_name, record_id, fields_to_hash=fields_to_hash)
+                if not is_valid:
+                    console.print(f"[red]❌ Verification failed: {error_msg}[/red]")
+                    raise typer.Exit(code=1)
+
+                proof = generate_record_proof(conn, table_name, record_id, fields_to_hash=fields_to_hash)
+                with open(export, "w") as f:
+                    json.dump(proof, f, indent=2, default=str)
+
+                console.print(f"[green]✅ Row verified successfully! Proof exported to:[/] [yellow]{export}[/yellow]")
+                return
+
+            # --- Verify multiple rows ---
+            all_valid = True
+            for record_id, payload in matching_rows:
+                is_valid, error_msg = verify_row(conn, table_name, record_id, fields_to_hash=fields_to_hash)
+                if is_valid:
+                    console.print(f"[green]✅[/green] Row ID [bold]{record_id}[/bold] is authentic")
+                else:
+                    console.print(f"[red]❌[/red] Row ID [bold]{record_id}[/bold] failed: {error_msg}")
+                    all_valid = False
+
+            if all_valid:
+                console.print(f"\n[bold green]✅ All {len(matching_rows)} row(s) verified successfully![/bold green]")
+            else:
+                console.print(f"\n[bold red]❌ Some rows failed verification![/bold red]")
+                raise typer.Exit(code=1)
+
+        finally:
+            conn.close()
+        return
+
+    # ------------------------------------------------------------
+    # Full table verification
+    # ------------------------------------------------------------
     verify_stored = not live and not comprehensive
     verify_live = live or comprehensive
 
@@ -165,85 +334,70 @@ def verify_table_command(
     else:
         console.print(f"Verifying live table state for [bold cyan]{table_name}[/]...")
 
-    conn = get_connection()
-    cfg = get_config()
-
     try:
-        # ------------------------------------------------------------
-        # Mode 1: Verify stored root against computed root
-        # ------------------------------------------------------------
+        # Mode 1: Verify stored root
         if verify_stored:
             console.print("\n[bold]Mode 1: Stored Root Verification[/bold]")
             stored_root_data = get_latest_merkle_root(table_name)
 
             if not stored_root_data:
-                console.print(f"[bold yellow]No stored Merkle root found for '{table_name}'. Nothing to verify.[/bold yellow]")
-                console.print("You can create one with: `maria-ledger verify --force`")
+                console.print(
+                    f"[bold yellow]No stored Merkle root found for '{table_name}'. "
+                    "Run `maria-ledger verify --force` to create one.[/bold yellow]"
+                )
                 if not verify_live:
                     raise typer.Exit()
             else:
                 stored_root, computed_at = stored_root_data
-                console.print(f" - Latest stored root: [bold white]{stored_root}[/bold white] (from {computed_at})")
+                console.print(f" - Latest stored root: [bold white]{stored_root}[/bold white] ({computed_at})")
 
                 live_computed_root = compute_root_from_chain_hashes(conn, table_name)
                 if not live_computed_root:
-                    console.print("[bold red]❌ FAILURE: Stored root exists, but ledger appears empty or corrupted.[/bold red]")
-                    if not verify_live:
-                        raise typer.Exit(code=1)
+                    console.print("[bold red]❌ Ledger appears empty or corrupted.[/bold red]")
+                    raise typer.Exit(code=1)
+
+                console.print(f" - Live computed root: [bold white]{live_computed_root}[/bold white]")
+                if stored_root == live_computed_root:
+                    console.print("[bold green]✅ Stored checkpoint verified.[/bold green]")
                 else:
-                    console.print(f" - Live computed root: [bold white]{live_computed_root}[/bold white]")
+                    console.print("[bold red]❌ TAMPERING DETECTED: Stored checkpoint mismatch![/bold red]")
+                    raise typer.Exit(code=1)
 
-                    if stored_root == live_computed_root:
-                        console.print("[bold green]✅ SUCCESS: Stored checkpoint verified.[/bold green]")
-                    else:
-                        console.print("[bold red]❌ TAMPERING DETECTED: Stored checkpoint mismatch![/bold red]")
-                        if not verify_live:
-                            raise typer.Exit(code=1)
-
-        # ------------------------------------------------------------
-        # Mode 2: Verify live table state against reconstructed state
-        # ------------------------------------------------------------
+        # Mode 2: Live state verification
         if verify_live:
             console.print("\n[bold]Mode 2: Live State Verification[/bold]")
-            fields_to_hash = ["name", "email"]  # Critical fields for integrity
-            console.print(f"Verifying against critical fields: [bold yellow]id, {', '.join(fields_to_hash)}[/bold yellow]")
+            fields_to_hash = ["name", "email"]
+            console.print(
+                f"Verifying against critical fields: [bold yellow]id, {', '.join(fields_to_hash)}[/bold yellow]"
+            )
 
-            # Reconstruct state from ledger
             console.print("Reconstructing state from ledger...")
             reconstructed_state, reconstructed_root = reconstruct_table_state(
                 conn, table_name, filters=filters, fields_to_hash=fields_to_hash
             )
-            console.print(f" [green]✓[/green] Reconstructed Merkle root: [bold]{reconstructed_root}[/bold]")
+            console.print(f" [green]✓[/green] Reconstructed root: [bold]{reconstructed_root}[/bold]")
 
-            # Compute Merkle root from live table
-            console.print(f"Computing Merkle root from live table '{table_name}'...")
+            console.print("Computing live table Merkle root...")
             live_root = get_merkle_root_of_current_state(
                 conn, table_name, filters=filters, fields_to_hash=fields_to_hash
             )
-            console.print(f" [green]✓[/green] Live table Merkle root: [bold]{live_root}[/bold]")
+            console.print(f" [green]✓[/green] Live table root: [bold]{live_root}[/bold]")
 
-            # Compare roots
             if reconstructed_root == live_root:
-                console.print("[bold green]✅ SUCCESS: Live table state matches the ledger.[/bold green]")
+                console.print("[bold green]✅ SUCCESS: Live table matches ledger.[/bold green]")
             else:
-                console.print("[bold red]❌ FAILURE: Live state mismatch detected![/bold red]")
+                console.print("[bold red]❌ MISMATCH DETECTED: Live table differs from ledger![/bold red]")
                 console.print("Finding discrepancies...")
 
                 live_stream = load_current_state_stream(conn, table_name, filters=filters)
-                try:
-                    discrepancies = find_discrepancies(
-                        reconstructed_state, live_stream, fields_to_hash=fields_to_hash
-                    )
-                    for issue in discrepancies:
-                        console.print(f" - [yellow]{issue}[/yellow]")
-                    raise typer.Exit(code=1)
-                finally:
-                    from collections import deque
-                    deque(live_stream, maxlen=0)
+                discrepancies = find_discrepancies(
+                    reconstructed_state, live_stream, fields_to_hash=fields_to_hash
+                )
+                for issue in discrepancies:
+                    console.print(f" - [yellow]{issue}[/yellow]")
+                raise typer.Exit(code=1)
 
-        # ------------------------------------------------------------
         # Final summary
-        # ------------------------------------------------------------
         if verify_stored and verify_live:
             console.print("\n[bold green]✅ Comprehensive verification completed successfully![/bold green]")
 

@@ -71,7 +71,7 @@ def forensic_command(
             
         # Exit with error if high-risk anomalies found
         if report['risk_score'] > 75:
-            console.print("\n[red]⚠️  High-risk anomalies detected![/red]")
+            console.print("\n[red]Warning: High-risk anomalies detected![/red]")
             raise typer.Exit(1)
             
     except Exception as e:
