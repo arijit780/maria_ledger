@@ -474,44 +474,22 @@ Result: Cryptographic proof of integrity (or detection of tampering)
 
 ```bash
 # Clone repository
-git clone <repository-url>
+git clone 
 cd maria_ledger
-
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate # On Windows: .venv\Scripts\activate
-
 # Install package
 pip install -e .
 ```
-
-### Step 2: Database Setup
-
-Create the ledger infrastructure in your MariaDB database:
+### Step 2: Generate Cryptographic Keys
 
 ```bash
-mysql -u YOUR_USER -p YOUR_DATABASE < maria_ledger/db/triggers.sql
-```
-
-This creates:
-- `ledger` table (universal ledger)
-- `ledger_roots` table (Merkle root checkpoints)
-- `append_ledger_entry` stored procedure
-
-### Step 3: Generate Cryptographic Keys
-
-```bash
-# Create keys directory
-mkdir -p keys
-
+# Create keys directory(in another terminal)
 # Generate private key
-openssl genrsa -out keys/private_key.pem 4096
-
 # Generate public key
-openssl rsa -in keys/private_key.pem -pubout -out keys/public_key.pem
+python maria_ledger/scripts/gen_keys.py
+#Wrote private_key.pem and public_key.pem to keys/
 ```
 
-### Step 4: Configure `config.yaml`
+### Step 3: Configure `config.yaml`
 
 Create `config.yaml` in the project root:
 
@@ -529,14 +507,11 @@ public_key_path: keys/public_key.pem
 signer_id: "maria-ledger"
 ```
 
-### Step 5: Verify Installation
+### Step 4: Verify Installation
 
 ```bash
 # Check CLI is available
 maria-ledger --help
-
-# Run audit to verify database connection
-maria-ledger audit
 ```
 
 ---
@@ -551,7 +526,7 @@ First, create the ledger infrastructure (ledger table, ledger_roots table, and s
 
 ```bash
 sudo mysql
-mysql -u YOUR_USER -p YOUR_DATABASE < maria_ledger/db/triggers.sql
+source maria_ledger/db/triggers.sql
 ```
 
 This creates:
@@ -623,9 +598,6 @@ Bring both tables under ledger control:
 
 ```bash
 #We dont need to bootstrap the customers table in the triggers.sql we already have done that
-
-python maria_ledger/scripts/gen_keys.py
-#Wrote private_key.pem and public_key.pem to keys/
 
 # Bootstrap products table
 maria-ledger bootstrap products
