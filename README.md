@@ -1034,39 +1034,6 @@ maria-ledger timeline products --from-tx 10 --to-tx 25
 ```
 ---
 
-## Architecture Diagram Prompt
-
-For generating architecture diagrams, use this prompt:
-
-```
-Design a technical architecture diagram for Maria Ledger showing:
-
-1. Application Layer: Python CLI and Library API
-2. Database Layer:
-- Universal ledger table (hash-chained entries)
-- ledger_roots table (Merkle checkpoints)
-- Business tables (products, customers, etc.)
-- Database triggers (automatic capture)
-- append_ledger_entry stored procedure
-3. Cryptographic Layer:
-- SHA-256 hash chains (prev_hash → chain_hash)
-- Merkle tree construction (periodic checkpoints)
-- Digital signatures (RSA signing of Merkle roots)
-4. Verification Layer:
-- External auditor verification (public key + Merkle root)
-- Hash chain continuity checks
-- Live state reconstruction
-5. MariaDB Features Integration:
-- ColumnStore (historical analytics)
-- Vector Search (semantic anomaly detection)
-- Temporal Tables (versioning)
-
-Include this quote: "Maria Ledger adds cryptographic guarantees to ANY MariaDB feature. We've integrated ColumnStore for efficient historical snapshot analysis and Vector search for semantic anomaly detection. It's cryptographic integrity meets MariaDB's analytics and AI capabilities."
-
-Show data flow: Application → Trigger → Stored Procedure → Ledger → Merkle Root → External Verification
-```
-
----
 
 
 
