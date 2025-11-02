@@ -7,10 +7,7 @@ from maria_ledger.cli.reconstruct import reconstruct_command
 from maria_ledger.cli.bootstrap import bootstrap_command
 from maria_ledger.cli.verify_chain import verify_chain_command
 from maria_ledger.cli.snapshot import snapshot_command
-# from maria_ledger.cli.verify_snapshot import verify_snapshot_command # Not implemented yet
 from maria_ledger.cli.timeline import timeline_command
-#from maria_ledger.cli.verify_rows import verify_rows_command
-# from maria_ledger.cli.trustmap import trustmap_command
 
 app = typer.Typer(help="Maria-Ledger CLI — verify and audit tamper-evident ledgers.")
 
@@ -21,9 +18,7 @@ app.command("forensic")(forensic_command)
 app.command("bootstrap")(bootstrap_command)
 app.command("verify-chain")(verify_chain_command)
 app.command("snapshot")(snapshot_command)
-# app.command("verify-snapshot")(verify_snapshot_command) # Not implemented yet
 app.command("timeline")(timeline_command)
-# app.command("trustmap")(trustmap_command)
 
 # Wrapped commands with filters
 @app.command("reconstruct")
@@ -40,24 +35,6 @@ def reconstruct_with_filter(
         out_csv=out_csv,
         filters=filters,
     )
-
-# # Deprecated commands with warnings
-# @app.command("verify-rows")
-# def verify_rows_with_deprecation_warning(
-#     table: str = typer.Argument(..., help="Table name to verify"),
-#     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed verification info"),
-#     json_output: bool = typer.Option(False, "--json", help="Output result in JSON format")
-#     ):
-#     """
-#     [DEPRECATED] Verify individual row hashes and chain integrity.
-#     This command is deprecated. Use 'maria-ledger verify-chain' for universal ledger verification.
-#     """
-#     from rich.console import Console
-#     console = Console()
-#     console.print("[bold yellow]⚠️ WARNING:[/bold yellow] [yellow]verify-rows is deprecated.[/yellow]")
-#     console.print("[yellow]Use 'maria-ledger verify-chain' for universal ledger verification.[/yellow]")
-#     console.print("")
-#     verify_rows_command(table, verbose, json_output)
 
 def main():
     app()
