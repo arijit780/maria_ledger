@@ -1068,20 +1068,6 @@ Show data flow: Application → Trigger → Stored Procedure → Ledger → Merk
 
 ---
 
-## Contributing
 
-Contributions welcome! Please read the contributing guidelines before submitting PRs.
 
-## License
-
-[Your License Here]
-
-## Support
-
-For issues and questions:
-- GitHub Issues: [Repository URL]
-- Documentation: [Docs URL]
-
----
-
-**Built with ❤️ for the MariaDB Hackathon**
+**Built with enthusiasm for the MariaDB Hackathon**
