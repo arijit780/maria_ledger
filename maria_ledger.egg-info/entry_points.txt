@@ -1,2 +1,0 @@
-[console_scripts]
-maria-ledger = maria_ledger.cli.main:main

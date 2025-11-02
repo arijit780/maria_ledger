@@ -1,4 +1,0 @@
-pyyaml
-typer
-tabulate
-mysql-connector-python

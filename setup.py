@@ -12,10 +12,12 @@ setup(
         "mysql-connector-python",
         "cryptography",
         "datetime",
+        "rich",
     ],
     entry_points={
         "console_scripts": [
-            "maria-ledger = maria_ledger.cli.main:main"
+            "maria-ledger = maria_ledger.cli.main:main",
+            "maria_ledger = maria_ledger.cli.main:main"
         ]
     },
 )

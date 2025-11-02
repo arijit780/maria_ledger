@@ -1,7 +1,12 @@
 config.yaml
 __pycache__
 *.pyc
-*.pyo
-*.egg-info
 *.pem
 keys/*
+future.md
+approach.md
+*.json
+*sql
+architecture.md
+*.csv
+*.egg-info/

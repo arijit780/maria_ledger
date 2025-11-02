@@ -1,10 +1,11 @@
 import typer
 import datetime
 from maria_ledger.db.connection import get_connection
-from maria_ledger.db.merkle_service import verify_table_with_merkle_root, compute_and_store_merkle_root
+from maria_ledger.db.merkle_service import compute_and_store_merkle_root
 from maria_ledger.utils.logger import get_logger
 from maria_ledger.utils.formatter import pretty_time
 from maria_ledger.utils.alerts import send_alert
+from maria_ledger.cli.reconstruct import reconstruct_table_state
 
 app = typer.Typer()
 logger = get_logger("audit")
@@ -18,15 +19,12 @@ def run(interval_hours: int = typer.Option(24, "--interval", help="Hours between
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
 
-    # Find all tables with a ledger structure
+    # Find all logical tables tracked in the universal ledger
     cursor.execute("""
-        SELECT TABLE_NAME
-        FROM information_schema.tables
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME LIKE 'ledger_%'
-          AND TABLE_NAME != 'ledger_roots'
+        SELECT DISTINCT table_name
+        FROM ledger
     """)
-    tables = [row["TABLE_NAME"] for row in cursor.fetchall()]
+    tables = [row["table_name"] for row in cursor.fetchall()]
     logger.info(f"Found {len(tables)} ledger tables.")
 
     issues = []
@@ -47,21 +45,24 @@ def run(interval_hours: int = typer.Option(24, "--interval", help="Hours between
             compute_and_store_merkle_root(table)
             continue
 
-        ok = verify_table_with_merkle_root(table, stored_root)
+        # Reconstruct state to get the current root for verification
+        _, computed_root = reconstruct_table_state(conn, table)
+        ok = (computed_root == stored_root)
+
         if ok:
-            logger.info(f"[✓] {table} integrity verified.")
+            logger.info(f"[{table}] integrity verified.")
         else:
-            logger.error(f"[✗] Tamper detected in {table}!")
+            logger.error(f"[FAILED] Tamper detected in {table}!")
             issues.append(table)
 
     cursor.close()
     conn.close()
 
     if issues:
-        msg = f"Integrity issues detected in: {', '.join(issues)}"
+        msg = f"Alert: Integrity issues detected in: {', '.join(issues)}"
         send_alert("MariaLedger Integrity Alert", msg)
-        typer.echo(f"[!] {msg}")
+        typer.echo(msg)
     else:
-        typer.echo("[✓] All ledger tables verified successfully.")
+        typer.echo("All ledger tables verified successfully.")
 
     logger.info(f"Audit completed at {pretty_time(datetime.datetime.utcnow())}")
