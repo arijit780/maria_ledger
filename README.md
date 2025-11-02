@@ -9,9 +9,9 @@ Maria Ledger adds cryptographic guarantees to any MariaDB table, enabling provab
 ## Table of Contents
 
 - [Overview](#overview)
+- [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [Installation & Setup](#installation--setup)
-- [Quick Start](#quick-start)
 - [CLI Commands Reference](#cli-commands-reference)
 - [Advanced Usage](#advanced-usage)
 - [Integration with MariaDB Features](#integration-with-mariadb-features)
@@ -316,152 +316,6 @@ Digital signature proves who created checkpoint → cannot deny
 
 ---
 
-## Architecture
-
-### Core Concepts
-
-#### 1. **Universal Ledger Pattern**
-
-Instead of creating separate audit tables for each business table, Maria Ledger uses **one universal `ledger` table** that tracks changes across all tables:
-
-```
-ledger table structure:
-├── tx_order (auto-increment transaction sequence)
-├── tx_id (unique transaction identifier - UUID)
-├── table_name (which business table changed)
-├── record_id (which record changed)
-├── op_type (INSERT, UPDATE, or DELETE)
-├── old_payload (JSON snapshot of old data)
-├── new_payload (JSON snapshot of new data)
-├── created_at (timestamp)
-├── prev_hash (previous entry's chain_hash)
-└── chain_hash (SHA-256 hash linking entries)
-```
-
-**Benefits:**
-- Simpler schema (one table vs. many)
-- Cross-table audit queries
-- Efficient Merkle tree construction
-- Centralized integrity verification
-
-#### 2. **Hash Chains**
-
-Each ledger entry is cryptographically linked to the previous entry:
-
-```
-Entry 1: chain_hash = SHA256(genesis_hash || tx_id || record_id || op_type || payload || timestamp)
-Entry 2: chain_hash = SHA256(Entry1.chain_hash || tx_id || record_id || op_type || payload || timestamp)
-Entry 3: chain_hash = SHA256(Entry2.chain_hash || tx_id || record_id || op_type || payload || timestamp)
-```
-
-**Properties:**
-- **Tamper-evident**: Any change breaks the chain
-- **Immutable**: Previous entries cannot be modified without detection
-- **Verifiable**: External auditors can recompute and verify
-
-#### 3. **Merkle Trees**
-
-Periodic checkpoints store Merkle roots of all ledger entries:
-
-```
-Merkle Tree Construction:
-1. Compute hash of each ledger entry (chain_hash)
-2. Build binary tree by hashing pairs: H(left || right)
-3. Root hash = single hash representing entire ledger state
-4. Sign root hash with private key for external verification
-```
-
-**Benefits:**
-- **Efficient Verification**: One hash proves integrity of millions of entries
-- **Point-in-Time Proofs**: Can prove state at any checkpoint
-- **External Auditing**: Merkle root + signature = verifiable proof
-
-#### 4. **Database Triggers**
-
-Automatic capture of all changes via MariaDB triggers:
-
-```sql
--- Example trigger for INSERT
-CREATE TRIGGER table_name_after_insert
-AFTER INSERT ON table_name
-FOR EACH ROW
-BEGIN
-CALL append_ledger_entry(
-'table_name',
-CAST(NEW.id AS CHAR),
-'INSERT',
-NULL,
-JSON_OBJECT(...)
-);
-END;
-```
-
-**Properties:**
-- **Automatic**: No application code changes required
-- **Atomic**: Trigger execution is part of the same transaction
-- **Consistent**: Hash chain computed in stored procedure with locking
-
-#### 5. **Stored Procedure: `append_ledger_entry`**
-
-Central procedure that ensures hash chain integrity:
-
-```sql
-CREATE PROCEDURE append_ledger_entry(
-p_table_name, p_record_id, p_op_type, p_old_payload, p_new_payload
-)
-BEGIN
--- 1. Lock last entry for this table (prevents concurrent writes)
-SELECT chain_hash INTO prev_hash FROM ledger
-WHERE table_name = p_table_name
-ORDER BY tx_order DESC LIMIT 1 FOR UPDATE;
--- 2. Compute chain_hash: SHA256(prev_hash || tx_id || ...)
-SET chain_hash = SHA256(CONCAT(prev_hash, tx_id, record_id, ...));
--- 3. Insert new ledger entry
-INSERT INTO ledger (..., prev_hash, chain_hash) VALUES (...);
-END;
-```
-
-**Why this works:**
-- `FOR UPDATE` lock ensures only one concurrent insertion per table
-- Genesis hash provides starting point for chain
-- Deterministic hash computation ensures reproducibility
-
-### Data Flow
-
-```
-Application INSERT/UPDATE/DELETE
-↓
-Database Trigger (automatic)
-↓
-append_ledger_entry() stored procedure
-↓
-Compute prev_hash (lock last entry)
-↓
-Compute chain_hash (SHA-256)
-↓
-Insert into ledger table
-↓
-Transaction commits (or rolls back)
-```
-
-### Verification Flow
-
-```
-External Auditor wants to verify:
-↓
-1. Get latest Merkle root + signature from ledger_roots
-↓
-2. Recompute Merkle root from all ledger entries
-↓
-3. Compare: stored root == computed root?
-↓
-4. Verify signature with public key
-↓
-Result: Cryptographic proof of integrity (or detection of tampering)
-```
-
----
-
 ## Installation & Setup
 
 ### Prerequisites
@@ -589,9 +443,10 @@ INSERT INTO products (name, price, category, description, stock) VALUES
 ('HDD 1TB', 59.99, 'Storage', 'External 1TB hard drive', 120),
 ('SSD 500GB', 89.99, 'Storage', 'NVMe SSD 500GB', 80),
 ('USB Hub', 24.99, 'Accessories', '7-port USB 3.0 hub', 100);
+
 "
 ```
-
+# update products set price = 55 where name = 'HDD 1TB';
 ### Step 4: Bootstrap Tables
 
 Bring both tables under ledger control:
@@ -1009,4 +864,154 @@ maria-ledger timeline products --from-tx 10 --to-tx 25
 
 
 
+## Architecture
+
+### Core Concepts
+
+#### 1. **Universal Ledger Pattern**
+
+Instead of creating separate audit tables for each business table, Maria Ledger uses **one universal `ledger` table** that tracks changes across all tables:
+
+```
+ledger table structure:
+├── tx_order (auto-increment transaction sequence)
+├── tx_id (unique transaction identifier - UUID)
+├── table_name (which business table changed)
+├── record_id (which record changed)
+├── op_type (INSERT, UPDATE, or DELETE)
+├── old_payload (JSON snapshot of old data)
+├── new_payload (JSON snapshot of new data)
+├── created_at (timestamp)
+├── prev_hash (previous entry's chain_hash)
+└── chain_hash (SHA-256 hash linking entries)
+```
+
+**Benefits:**
+- Simpler schema (one table vs. many)
+- Cross-table audit queries
+- Efficient Merkle tree construction
+- Centralized integrity verification
+
+#### 2. **Hash Chains**
+
+Each ledger entry is cryptographically linked to the previous entry:
+
+```
+Entry 1: chain_hash = SHA256(genesis_hash || tx_id || record_id || op_type || payload || timestamp)
+Entry 2: chain_hash = SHA256(Entry1.chain_hash || tx_id || record_id || op_type || payload || timestamp)
+Entry 3: chain_hash = SHA256(Entry2.chain_hash || tx_id || record_id || op_type || payload || timestamp)
+```
+
+**Properties:**
+- **Tamper-evident**: Any change breaks the chain
+- **Immutable**: Previous entries cannot be modified without detection
+- **Verifiable**: External auditors can recompute and verify
+
+#### 3. **Merkle Trees**
+
+Periodic checkpoints store Merkle roots of all ledger entries:
+
+```
+Merkle Tree Construction:
+1. Compute hash of each ledger entry (chain_hash)
+2. Build binary tree by hashing pairs: H(left || right)
+3. Root hash = single hash representing entire ledger state
+4. Sign root hash with private key for external verification
+```
+
+**Benefits:**
+- **Efficient Verification**: One hash proves integrity of millions of entries
+- **Point-in-Time Proofs**: Can prove state at any checkpoint
+- **External Auditing**: Merkle root + signature = verifiable proof
+
+#### 4. **Database Triggers**
+
+Automatic capture of all changes via MariaDB triggers:
+
+```sql
+-- Example trigger for INSERT
+CREATE TRIGGER table_name_after_insert
+AFTER INSERT ON table_name
+FOR EACH ROW
+BEGIN
+CALL append_ledger_entry(
+'table_name',
+CAST(NEW.id AS CHAR),
+'INSERT',
+NULL,
+JSON_OBJECT(...)
+);
+END;
+```
+
+**Properties:**
+- **Automatic**: No application code changes required
+- **Atomic**: Trigger execution is part of the same transaction
+- **Consistent**: Hash chain computed in stored procedure with locking
+
+#### 5. **Stored Procedure: `append_ledger_entry`**
+
+Central procedure that ensures hash chain integrity:
+
+```sql
+CREATE PROCEDURE append_ledger_entry(
+p_table_name, p_record_id, p_op_type, p_old_payload, p_new_payload
+)
+BEGIN
+-- 1. Lock last entry for this table (prevents concurrent writes)
+SELECT chain_hash INTO prev_hash FROM ledger
+WHERE table_name = p_table_name
+ORDER BY tx_order DESC LIMIT 1 FOR UPDATE;
+-- 2. Compute chain_hash: SHA256(prev_hash || tx_id || ...)
+SET chain_hash = SHA256(CONCAT(prev_hash, tx_id, record_id, ...));
+-- 3. Insert new ledger entry
+INSERT INTO ledger (..., prev_hash, chain_hash) VALUES (...);
+END;
+```
+
+**Why this works:**
+- `FOR UPDATE` lock ensures only one concurrent insertion per table
+- Genesis hash provides starting point for chain
+- Deterministic hash computation ensures reproducibility
+
+### Data Flow
+
+```
+Application INSERT/UPDATE/DELETE
+↓
+Database Trigger (automatic)
+↓
+append_ledger_entry() stored procedure
+↓
+Compute prev_hash (lock last entry)
+↓
+Compute chain_hash (SHA-256)
+↓
+Insert into ledger table
+↓
+Transaction commits (or rolls back)
+```
+
+### Verification Flow
+
+```
+External Auditor wants to verify:
+↓
+1. Get latest Merkle root + signature from ledger_roots
+↓
+2. Recompute Merkle root from all ledger entries
+↓
+3. Compare: stored root == computed root?
+↓
+4. Verify signature with public key
+↓
+Result: Cryptographic proof of integrity (or detection of tampering)
+```
+
+---
+
+
+
+
 **Built with enthusiasm for the MariaDB Hackathon**
+
