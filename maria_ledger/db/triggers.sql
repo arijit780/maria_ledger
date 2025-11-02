@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS ledger_roots (
     signer VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci,
     signature TEXT,
     pubkey_fingerprint VARCHAR(64),
+    fields_to_hash TEXT NULL COMMENT 'JSON array of field names used to compute the root hash',
     INDEX idx_roots_lookup (table_name, computed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 

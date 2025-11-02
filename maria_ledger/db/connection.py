@@ -9,5 +9,6 @@ def get_connection():
         port=db.get("port", 3306),
         user=db["user"],
         password=db["password"],
-        database=db["name"]
+        database=db["name"],
+        use_pure=True  # Force pure Python implementation to support 'multi=True'
     )

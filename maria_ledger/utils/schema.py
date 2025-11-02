@@ -61,9 +61,11 @@ def get_primary_key(conn, table_name: str) -> Optional[str]:
             JOIN information_schema.key_column_usage k
                 ON t.constraint_name = k.constraint_name
                 AND t.table_schema = k.table_schema
+                AND t.table_name = k.table_name
             WHERE t.constraint_type = 'PRIMARY KEY'
-              AND t.table_schema = %s
-              AND t.table_name = %s
+                AND t.table_schema = %s
+                AND t.table_name = %s
+            ORDER BY k.ordinal_position
             LIMIT 1
             """,
             (db_name, table_name),

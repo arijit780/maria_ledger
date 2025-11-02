@@ -4,14 +4,21 @@ helpers.py
 Shared utility functions used across the CLI and other modules.
 """
 import json
-from datetime import datetime
+import decimal
+from datetime import datetime, date
 from typing import List, Optional, Tuple
 
 
 def json_serial(obj):
-    """Custom JSON serializer for objects not serializable by default json code, like datetime."""
+    """Custom JSON serializer for objects not serializable by default json code, like datetime, Decimal."""
     if isinstance(obj, datetime):
         return obj.isoformat()
+    if isinstance(obj, date):
+        return obj.isoformat()
+    if isinstance(obj, decimal.Decimal):
+        # Convert Decimal to float for JSON serialization
+        # This preserves numeric value while making it JSON-compatible
+        return float(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
 
 
